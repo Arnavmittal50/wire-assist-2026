@@ -19,6 +19,7 @@ import logging
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.services.member_data import history_before_wire_request
 from app.schemas.contracts import (AnalysisResult, ActionType, Evidence, Insight, Session, uid,
                                    InitialAnalysis, InitialAnalysisResult, SummaryFact)
 from app.services.signal_validation import (TIME_PRESSURE, TITLES, detect_observations,
@@ -180,6 +181,8 @@ def _context(session: Session, events: list[dict], *, all_history=False) -> tupl
         # Explicit allowlisting excludes event_note, answer-key labels and arbitrary extra data.
         eligible.append((occurred, clean))
     ordered = [event for _, event in sorted(eligible, key=lambda row: row[0])]
+    if session.mode == 'live' and (all_history or not session.payment_known):
+        ordered = history_before_wire_request(ordered)
     baseline = session.initial_analysis
     bounded_events = ordered
     event_text = {
@@ -189,7 +192,6 @@ def _context(session: Session, events: list[dict], *, all_history=False) -> tupl
     context = {
         "member_id": session.member_id,
         "as_of": session.as_of.astimezone(timezone.utc).isoformat(),
-        "proposed_payment": session.payment.model_dump(mode="json"),
         "finalized_segments": [
             {"segment_id": s.segment_id, "speaker": s.speaker if s.diarization_status == "CONFIRMED" else "unknown", "text": s.text}
             for s in segments
@@ -207,7 +209,9 @@ def _context(session: Session, events: list[dict], *, all_history=False) -> tupl
             for signal in session.attention.signals if signal.status == "active"
         ][:20],
     }
-    if not all_history and session.mode == "live":
+    if not all_history and (session.mode != 'live' or session.payment_known):
+        context['proposed_payment'] = session.payment.model_dump(mode='json')
+    if not all_history and session.mode == "live" and session.payment_known:
         # The entered payment is real application input, but is not an historical
         # event. Give it explicit provenance without changing history counts.
         payment_text = json.dumps(session.payment.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
@@ -255,6 +259,29 @@ def _grounded(result: AnalysisResult, segments: dict[str, str], events: dict[str
         seen = set()
         for observation in insight.signals:
             source = (segments if observation.source_type == "segment" else events).get(observation.source_id)
+            if (source and observation.signal_type == 'LARGE_TRANSACTION'
+                    and observation.status != 'NOT_ESTABLISHED'):
+                # This category has a numeric definition. A high baseline ratio
+                # cannot turn a recorded $51k payment into a >= $100k transaction.
+                if observation.source_type == 'event':
+                    try:
+                        amount = json.loads(source).get('amount')
+                    except (ValueError, AttributeError):
+                        amount = None
+                    below_threshold = not isinstance(amount, (int, float)) or isinstance(amount, bool) or amount < 100000
+                else:
+                    # Parse explicit currency literals only. Leave nonnumeric wording
+                    # to contextual interpretation; do not run scam keyword matching.
+                    scales = {'thousand': 1000, 'k': 1000, 'million': 1000000, 'm': 1000000,
+                              'billion': 1000000000, 'b': 1000000000}
+                    amounts = [float(value.replace(',', '')) * scales.get(unit.lower(), 1)
+                               for value, unit in re.findall(
+                        r'\$\s*(\d[\d,]*(?:\.\d+)?)(?:\s*(thousand|million|billion|[kmb])\b)?',
+                        observation.evidence_quote, re.I)]
+                    below_threshold = bool(amounts) and max(amounts) < 100000
+                if below_threshold:
+                    excluded += 1
+                    continue
             if (not source or not observation.evidence_quote.strip() or observation.evidence_quote not in source
                     or observation.signal_type in seen
                     or not observation.explanation.strip() or not observation.suggested_question.strip()):
@@ -286,6 +313,10 @@ def _grounded(result: AnalysisResult, segments: dict[str, str], events: dict[str
             "source_event_ids": sorted(source_events), "signals": checked,
             "evidence": citations,
             "signal_codes": sorted(eligible),
+            "verification_checks": [check.model_copy(update={'status': 'NOT_ESTABLISHED', 'evidence': []})
+                if check.status == 'CONFIRMED' and (not check.evidence or any(
+                    e.source_type != 'segment' or not e.quote.strip() or e.quote not in segments.get(e.source_id, '')
+                    for e in check.evidence)) else check for check in insight.verification_checks],
         }))
     return AnalysisResult(insights=accepted), suppressed, excluded
 
@@ -425,11 +456,15 @@ def _demo(segments: dict[str, str], events: dict[str, str]) -> AnalysisResult:
 
 
 class AnalysisService:
-    def __init__(self, settings: Settings, client_factory: Callable[..., Any] = _make_client):
+    def __init__(self, settings: Settings, client_factory: Callable[..., Any] = _make_client,
+                 *, live_prompt=None, live_context_builder=None, record_quote_normalizer=None):
         self._settings = settings
         self._client_factory = client_factory
         self._rate_limited_until: dict[str, float] = {}
         self._unavailable_until: dict[str, float] = {}
+        self._live_prompt = live_prompt
+        self._live_context_builder = live_context_builder
+        self._record_quote_normalizer = record_quote_normalizer
 
     async def analyze(self, session: Session, events: list[dict]) -> tuple[AnalysisResult, Provider, str]:
         try:
@@ -445,6 +480,7 @@ class AnalysisService:
         baseline.insights = []
         baseline.payment.purpose = ""
         baseline.initial_analysis = None
+        baseline.payment_known = False
         baseline.attention.signals = [s for s in baseline.attention.signals if s.origin == "history"]
         result, provider, notice = await self._run(baseline, events, initial=True)
         _, _, event_text = _context(baseline, events, all_history=True)
@@ -457,6 +493,8 @@ class AnalysisService:
         if not session.consent:
             return schema(), "unavailable", "Conversation consent is required before analysis. No model has been called."
         context, segment_text, event_text = _context(session, events, all_history=initial)
+        if not initial and session.mode == 'live' and self._live_context_builder:
+            context, segment_text, event_text = self._live_context_builder(session, events, False)
         model = model_override or (self._settings.gemini_analysis_model if initial else self._settings.gemini_update_model)
         can_recover = not initial and model_override is None and model != self._settings.gemini_analysis_model
 
@@ -465,7 +503,7 @@ class AnalysisService:
             result, provider, notice = await self._run(
                 session, events, initial=False, model_override=self._settings.gemini_analysis_model)
             return result, provider, f"{model} {reason}; tried {self._settings.gemini_analysis_model}. {notice}"
-        prompt = SYSTEM_PROMPT
+        prompt = self._live_prompt if not initial and self._live_prompt else SYSTEM_PROMPT
         prompt += "\nBefore returning, internally check every claim against original evidence, speaker attribution, later contradictions and uncertainty. Return only supported current findings. Prefer one useful next question; avoid repeating the transcript."
         if initial:
             prompt += "\nThis is the INITIAL review of the member's complete eligible history. Produce up to six concise summary facts, each with exact event citations, and up to three potential issues/questions as insights. Summarize normal context too. No conversation has occurred. Describe uncertainty; do not invent issues."
@@ -514,7 +552,7 @@ class AnalysisService:
                                     response_schema=gemini_response_schema(schema), max_output_tokens=8192 if initial else 4096,
                                     thinking_config=types.ThinkingConfig(thinking_level="low"),
                                 )), timeout=max(0.01, min(self._settings.provider_timeout_seconds,
-                                    self._settings.guidance_timeout_seconds if model_override else 4)
+                                    self._settings.guidance_timeout_seconds if model_override or self._live_context_builder else 4)
                                     if not initial else self._settings.provider_timeout_seconds))
                         break
                     except Exception as error:
@@ -524,6 +562,8 @@ class AnalysisService:
                 data = json.loads(response.text or "")
                 if not isinstance(data, dict):
                     raise ValueError("Expected a structured assessment object")
+                if self._record_quote_normalizer:
+                    data = self._record_quote_normalizer(data, event_text)
                 return data
 
             proposed = await generate(prompt, context)

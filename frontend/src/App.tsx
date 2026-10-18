@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, ChevronDown, CircleHelp, History as HistoryIcon, Mic, Settings2, X } from 'lucide-react';
+import { AudioLines, ChevronDown, CircleHelp, History as HistoryIcon, Settings2, X } from 'lucide-react';
 import { ApiClient, DEFAULT_AS_OF, DEFAULT_TOKEN } from './services/api';
 import type { ActionInput, InitialAnalysis, FinancialEvent, Health, Member, Payment, Session, SessionSummary, Speaker, TranscriptInput } from './types/api';
 import { useSessionSocket } from './hooks/useSessionSocket';
@@ -14,7 +14,7 @@ import { History } from './components/History';
 import { MemberPanel } from './components/MemberPanel';
 import { GuidancePanel } from './components/GuidancePanel';
 import { Transcript } from './components/Transcript';
-import { AttentionPanel } from './components/AttentionPanel';
+import { SessionControls } from './components/SessionControls';
 import { InitialReview } from './components/InitialReview';
 import { ActionDialog } from './components/ActionDialog';
 import { EmployeeActions } from './components/EmployeeActions';
@@ -39,8 +39,6 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [consent, setConsent] = useState(false);
-  const [retention, setRetention] = useState(false);
   const [mode, setMode] = useState<'demo' | 'live'>('demo');
   const modeChosen = useRef(false);
   const [payment, setPayment] = useState<Payment>({ amount: 1500, rail: 'Wire', recipient_id: 'R1002-09', purpose: '' });
@@ -61,7 +59,7 @@ export default function App() {
   const activateSession = useCallback((next: Session) => {
     activeSessionId.current = next.session_id; setSession(next); setSummary(previous => previous?.session_id === next.session_id ? previous : null);
     setMemberId(next.member_id); setAsOf(next.as_of); setPayment(next.payment); setMode(next.mode);
-    setConsent(next.consent); setRetention(next.retain_transcript); setSpeaker('auto');
+    setSpeaker('auto');
     localStorage.setItem('wire-assist-session', next.session_id);
   }, []);
   const { connection, partial, send, sendAudio } = useSessionSocket(api, session?.session_id, applySession, setError);
@@ -109,13 +107,13 @@ export default function App() {
     let cancelled = false;
     setPreAnalysis(null); setPrePending(true);
     const timer = setTimeout(() => {
-      void api.preAnalysis({ member_id: memberId, as_of: asOf, consent: false, retain_transcript: false, mode: 'live', payment })
+      void api.preAnalysis({ member_id: memberId, as_of: asOf, consent: false, retain_transcript: false, mode: 'live' })
         .then(result => { if (!cancelled) setPreAnalysis(result); })
         .catch(() => { if (!cancelled) setPreAnalysis({ provider: 'unavailable', model: null, event_count: events.length, insights: [], summary: [], notice: 'Pre-call analysis is unavailable. You can still call the member.' }); })
         .finally(() => { if (!cancelled) setPrePending(false); });
     }, 500);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [api, memberId, asOf, selectedMember?.member_id, payment.amount, payment.rail, payment.recipient_id, session?.session_id]);
+  }, [api, memberId, asOf, selectedMember?.member_id, session?.session_id]);
 
   async function startPhoneCall() {
     if (!processing) { await call.start(); return; }
@@ -123,7 +121,7 @@ export default function App() {
     try {
       let review = session;
       if (!review || review.status === 'ended') {
-        review = await api.createSession({ member_id: memberId, as_of: asOf, consent: true, retain_transcript: retention, mode: 'live', payment });
+        review = await api.createSession({ member_id: memberId, as_of: asOf, consent: true, retain_transcript: true, mode: 'live', payment_known: false });
         activateSession(review);
       }
       if (review.mode !== 'live') throw new Error('End the demo review and start a new live call to enable AI processing.');
@@ -145,13 +143,6 @@ export default function App() {
     if (!session || session.status !== 'active') return;
     setBusy(true);
     try { applySession(await api.retryGuidance(session.session_id)); }
-    catch (failure) { setError((failure as Error).message); }
-    finally { setBusy(false); }
-  }
-  async function startReview() {
-    setBusy(true); setError('');
-    const generation = ++sessionGeneration.current;
-    try { const next = await api.createSession({ member_id: memberId, as_of: asOf, consent, retain_transcript: retention, mode, payment }); if (generation === sessionGeneration.current) activateSession(next); }
     catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   }
@@ -195,7 +186,7 @@ export default function App() {
   }
   function newReview() {
     microphone.stop(); sessionGeneration.current++; activeSessionId.current = null;
-    setSession(null); setSummary(null); setConsent(false); setRetention(false); setPendingAction(null); setError(''); pendingTranscript.current = null;
+    setSession(null); setSummary(null); setPendingAction(null); setError(''); pendingTranscript.current = null;
     localStorage.removeItem('wire-assist-session');
   }
   async function deleteReview() {
@@ -220,11 +211,22 @@ export default function App() {
     catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   }
-  function selectMember(id: string) {
-    setMemberId(id); setPayment(previous => ({ ...previous, recipient_id: '', purpose: '' }));
+  async function selectMember(id: string) {
+    if (id === memberId || busy || call.active) return;
+    setBusy(true); setError(''); microphone.stop();
+    try {
+      // Save the old review before releasing it; switching never deletes its transcript.
+      if (session?.status === 'active') await api.end(session.session_id);
+      newReview();
+      setMemberId(id);
+      setAsOf(id === 'M1057' ? '2026-10-19T16:41:00Z' : DEFAULT_AS_OF);
+      setPayment({ amount: id === 'M1057' ? 51586.52 : 1500, rail: 'Wire',
+        recipient_id: id === 'M1057' ? 'R1057-10' : id === 'M1002' ? 'R1002-09' : '', purpose: '' });
+    } catch (failure) { setError((failure as Error).message); }
+    finally { setBusy(false); }
   }
   function demoSetup(id: 'M1002' | 'M1057') {
-    modeChosen.current = true; setMemberId(id); setConsent(false); setMode('demo');
+    modeChosen.current = true; setMemberId(id); setMode('demo');
     setAsOf(id === 'M1002' ? DEFAULT_AS_OF : '2026-10-19T16:41:00Z');
     setPayment({ amount: id === 'M1002' ? 1500 : 51586.52, rail: 'Wire', recipient_id: id === 'M1002' ? 'R1002-09' : 'R1057-10', purpose: '' });
   }
@@ -252,19 +254,24 @@ export default function App() {
       {summary && <SessionSummaryCard summary={summary} busy={busy} onNew={newReview} onDelete={() => void deleteReview()} />}
 
       <div className="workspace-grid">
-        <MemberPanel members={members} memberId={memberId} onSelect={selectMember} disabled={!!session || call.active || busy}
+        <MemberPanel members={members} memberId={memberId} onSelect={id => void selectMember(id)} disabled={call.active || busy}
           payment={session?.payment ?? payment} asOf={asOf} eventCount={events.length} loading={loadingHistory}
+          paymentKnown={mode === 'demo' || !!session && session.payment_known !== false}
+          conversationStarted={!!session?.segments.some(segment => segment.speaker === 'member')}
           newRecipient={!!attention?.signals.some(signal => signal.code === 'NEW_RECIPIENT' && signal.status === 'active')}>
-          {attention ? <AttentionPanel attention={attention} disabled={busy || session?.status !== 'active'} onResolve={signal => setPendingAction({ action_type: 'RESOLVE_SIGNAL', signal_id: signal.signal_id })} onDismiss={signal => setPendingAction({ action_type: 'DISMISS_SIGNAL', signal_id: signal.signal_id })} /> : <section className="evidence-empty"><div className="card-heading"><h2>Evidence flags</h2><span className="eyebrow">Awaiting review</span></div><p>Start a review to evaluate the available member history and payment request.</p></section>}
+          <InitialReview embedded session={session ?? { initial_analysis: preAnalysis, payment, as_of: asOf, analysis_pending: prePending }}
+            attention={attention} disabled={busy || session?.status !== 'active'}
+            onResolve={signal => setPendingAction({ action_type: 'RESOLVE_SIGNAL', signal_id: signal.signal_id })}
+            onDismiss={signal => setPendingAction({ action_type: 'DISMISS_SIGNAL', signal_id: signal.signal_id })} />
         </MemberPanel>
         <section className="conversation-panel workspace-panel" aria-label="Conversation">
           <CallControls call={call} onStart={() => void startPhoneCall()} preparing={busy} microphoneBusy={['recording', 'starting', 'connecting'].includes(microphone.status)} title={`${payment.rail} ${payment.rail === 'Wire' ? 'transfer' : 'payment'} verification`} recording={microphone.status === 'recording'} mode={mode} />
-          <label className="check-label call-consent"><input type="checkbox" checked={processing} disabled={call.active || busy} onChange={event => setProcessing(event.target.checked)} /><span>Enable AI call assistance. The member and I consent to live transcription and AI analysis.</span></label>
+          <label className="check-label call-consent"><input type="checkbox" checked={processing} disabled={call.active || busy} onChange={event => setProcessing(event.target.checked)} /><span>Enable AI call assistance. The member and I consent to live transcription, AI analysis, and saving conversation notes.</span></label>
           <div className="transcript-toolbar"><h2>Transcript</h2><span className={`connection-label ${connection === 'disconnected' ? 'connection-error' : ''}`}><span className={`status-dot ${connection === 'connected' ? 'green' : ''}`} />{connection === 'connected' ? 'Connected' : connection === 'disconnected' ? 'Disconnected · reconnecting' : connection === 'connecting' ? 'Connecting…' : 'Not started'}</span></div>
-        {!session ? <div className="consent-panel"><div className="consent-icon"><Mic size={24} /></div><h2>Start a member review</h2><p>Choose a synthetic member, confirm consent, and start a private review.</p><label className="check-label"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} /><span>The member consents to this conversation being processed, including audio if enabled.</span></label><label className="check-label retention-label"><input type="checkbox" checked={retention} onChange={event => setRetention(event.target.checked)} /><span>Retain finalized transcript text for this demonstration.</span></label><div className="start-row"><label className="sr-only" htmlFor="mode-select">Analysis mode</label><select id="mode-select" value={mode} onChange={event => { modeChosen.current = true; setMode(event.target.value as 'demo' | 'live'); }}><option value="demo">Demo · local analysis</option><option value="live" disabled={!['gemini', 'groq'].includes(health?.analysis_provider ?? '')}>Live · AI analysis</option></select><Button onClick={startReview} disabled={!consent || busy || !selectedMember}>{busy ? 'Starting…' : 'Start review'}<ArrowRight size={16} /></Button></div><p className="fine-print">Demo mode needs no API key. Raw audio is never retained by default.</p></div> : <>{session.transcription_notice && <p className="speaker-notice" role="status">{session.transcription_notice}</p>}<Transcript memberName={selectedMember?.label.replace(/^Synthetic member /, 'Member ')} sessionStartedAt={session.created_at} segments={session.segments} partial={partial} speakerNotice={session.speaker_notice} diarizationPending={session.diarization_pending} diarizationNotice={session.diarization_notice} onCorrectSpeaker={session.status === 'active' ? correctSpeaker : undefined} disabled={busy} emptyMessage={session.status === 'ended' && !session.retain_transcript ? 'Conversation text was not retained.' : undefined} /><ConversationControls microphoneDisabled={call.active} status={microphone.status} live={session.mode === 'live'} speaker={speaker} setSpeaker={setSpeaker} onStart={() => { setError(''); void microphone.start(); }} onPause={microphone.pause} onStop={microphone.stop} onSubmit={submitTranscript} disabled={session.status !== 'active'} busy={busy} providerReady={health?.transcription_provider === 'gemini_live' && connection === 'connected'} /></>}
+        {!session ? <div className="transcript-empty"><span className="empty-icon"><AudioLines size={28} /></span><h3>Ready for a conversation</h3><p>Call the member to begin. With AI call assistance enabled, the live transcript appears here.</p></div> : <>{session.transcription_notice && <p className="speaker-notice" role="status">{session.transcription_notice}</p>}<Transcript memberName={selectedMember?.label.replace(/^Synthetic member /, 'Member ')} sessionStartedAt={session.created_at} segments={session.segments} partial={partial} speakerNotice={session.speaker_notice} diarizationPending={session.diarization_pending} diarizationNotice={session.diarization_notice} onCorrectSpeaker={session.status === 'active' ? correctSpeaker : undefined} disabled={busy} emptyMessage={session.status === 'ended' && !session.retain_transcript ? 'Conversation text was not retained.' : undefined} /><ConversationControls microphoneDisabled={call.active} status={microphone.status} live={session.mode === 'live'} speaker={speaker} setSpeaker={setSpeaker} onStart={() => { setError(''); void microphone.start(); }} onPause={microphone.pause} onStop={microphone.stop} onSubmit={submitTranscript} disabled={session.status !== 'active'} busy={busy} providerReady={health?.transcription_provider === 'gemini_live' && connection === 'connected'} /></>}
         </section>
         <GuidancePanel key={session?.session_id ?? 'new'} session={session} primary={primary} busy={busy}
-          onRetry={() => void retryGuidance()} onEnd={() => void endReview()} onAction={setPendingAction}
+          onRetry={() => void retryGuidance()} onAction={setPendingAction}
           onAcknowledge={insight => void recordAction({ action_type: 'ACKNOWLEDGE', insight_id: insight.insight_id, note: 'Guidance reviewed by the teller.' })} />
       </div>
       <section className="review-setup" aria-label="Review setup">
@@ -274,9 +281,9 @@ export default function App() {
       </section>
       <div className="support-grid">
         <History events={events} loading={loadingHistory} />
-        {session ? <InitialReview session={session} /> : <InitialReview session={{ initial_analysis: preAnalysis, payment, as_of: asOf, analysis_pending: prePending }} />}
         {session && <EmployeeActions session={session} busy={busy} secondaryOnly onAction={action_type => setPendingAction({ action_type })} />}
       </div>
+      <SessionControls session={session} busy={busy} onAction={setPendingAction} onEnd={() => void endReview()} />
     </main>
     <footer className="page-footer"><span><span className={`status-dot ${health ? 'green' : ''}`} />{health ? 'Backend connected' : 'Connecting to backend'} · {session?.status === 'active' ? 'Review in progress' : session?.status === 'ended' ? 'Review completed' : 'Ready for a new review'}</span><span>{health?.data_source?.includes('fixture') ? 'Sample fixtures' : 'Synthetic CSV data'} · Phone calls are real</span></footer>
     {pendingAction && <ActionDialog action={pendingAction} busy={busy} onClose={() => setPendingAction(null)} onConfirm={note => recordAction({ ...pendingAction, note })} />}

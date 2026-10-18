@@ -1,10 +1,10 @@
-# Phase 2: consented call transcription and Groq guidance
+# Phase 2: consented call transcription and Gemini live guidance
 
 Phase 1's browser-to-phone call, configured destination, mute, timer, and hang-up controls are preserved. Check **Enable AI call assistance** to attach a live review to the call. Leave it unchecked for calling without audio processing. No automated test places a phone call.
 
 ## What runs where
 
-- **Groq** performs pre-call synthetic-history review and live analysis. Gemini does not perform application risk analysis.
+- **Groq** performs pre-call synthetic-history review. **Gemini `gemini-3.5-flash-lite`** performs live analysis through the same evidence validation and deterministic attention rules. Live requests never fall back to Groq.
 - **Gemini `gemini-3.5-transcribe-live`** transcribes two independent PCM connections. The existing Live adapter is reused; no extra speaker diarization runs on identified call tracks.
 - **FastAPI** validates source evidence, manages consent and queues, and calculates deterministic attention scores. Possible impersonation is a hypothesis, not confirmation, and does not score.
 - **React** shows pre-call context automatically on member selection, chronologically ordered transcript turns, one current recommendation, an attention indicator, and collapsed previous guidance. Refresh Analysis, acknowledge, and dismiss remain available.
@@ -12,7 +12,7 @@ Phase 1's browser-to-phone call, configured destination, mute, timer, and hang-u
 ## Consent and track mapping
 
 1. The teller enables AI call assistance and confirms in the dashboard that both participants consent to transcription and analysis. The authenticated `/api/twilio/prepare` endpoint requires `participants_consent: true` and returns an expiring session ticket.
-2. The signed `/twilio/voice` webhook binds that ticket to the browser parent CallSid. The existing `<Dial><Number>` connects the configured phone directly. There is no application-generated phone announcement, keypad prompt, or private notice URL.
+2. The signed `/twilio/voice` webhook binds that ticket to the browser parent CallSid. `<Dial><Number>` connects the configured phone directly. The application does not play an AI monitoring announcement or request keypad input.
 3. When the signed member-leg callback reports `in-progress`, the backend starts the parent's unidirectional `both_tracks` stream through the [Streams REST API](https://www.twilio.com/docs/voice/api/stream-resource). Duplicate answer callbacks cannot create duplicate streams.
 
 Media endpoint: **`wss://<PUBLIC_BACKEND_HOST>/twilio/media/{ticket}`**. The original external WSS handshake URL is signature-validated against the configured public origin, including the documented optional trailing-slash form. HTTP webhook signatures continue to use HTTPS. Host/forwarded headers are not trusted. The start message must match the configured account, parent call, stream, both tracks, and 8 kHz mono mu-law format. Only one stream connection is accepted per ticket.
@@ -28,11 +28,13 @@ Each track has its own reorder buffer, mu-law decoder, stateful 8-to-16 kHz line
 
 The [Gemini Live transcription API](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe) supports incremental raw PCM. The implementation sends 100 ms PCM chunks, with a hybrid end-of-turn hint after 500 ms of silence. It does **not** use 3–5 second batch requests. Finalized text is committed with session/segment/call/stream IDs, role, start/end times, source, final flag and revision. Timing is marked estimated when the provider supplies no offsets. The existing Live session's approximately ten-minute limit remains; a failure is visible without ending the phone call.
 
-At hang-up, bounded draining finalizes already authorized audio, then connections, tasks, queues and buffers close. The session summary uses finalized content and honors transcript retention. Unretained conversation text is removed under the existing retention policy. Provider failure never generates fake transcripts or findings.
+At hang-up, bounded draining finalizes already authorized audio, then connections, tasks, queues and buffers close. Calls now retain finalized conversation text and all insight versions by default. The session summary includes the transcript, previous and current insights with their statuses, and scam references; these remain available in Saved sessions after a restart. Explicit nonretention requests from other API clients still follow the server retention policy. Raw audio is not stored. Provider failure never generates fake transcripts or findings.
 
-## Groq model selection and real API checks
+## Current routing and historical Groq benchmarks
 
-Selected configuration:
+Live guidance uses `GEMINI_UPDATE_MODEL=gemini-3.5-flash-lite`. Three real synthetic Gemini checks returned the investment-verification question, a five-point identity probe, and a confirming answer with CONTINUE_REVIEW and zero conversation points (about 2.6?4.6 seconds per assessment). Pre-call history remains on Groq 120B. The Groq 20B comparisons below describe the earlier configuration and remain available as standalone benchmarks.
+
+Historical Groq comparison configuration:
 
 ```dotenv
 GROQ_MODEL=openai/gpt-oss-20b
@@ -45,14 +47,14 @@ Small synthetic benchmarks used the application's real schema and validators, in
 
 | Model | Results after validation fixes | Measured request time |
 | --- | --- | --- |
-| GPT-OSS 20B | Passed the three live regression cases and history review; selected for live guidance | About 0.8–1.4 s provider time; 1.5–3.6 s including connection and one repair in the tested live cases |
+| GPT-OSS 20B | Passed the three live regression cases and history review; previously selected for live guidance | About 0.8–1.4 s provider time; 1.5–3.6 s including connection and one repair in the tested live cases |
 | GPT-OSS 120B | Returned three validated M1002 history facts; one live urgency case still failed citation validation after repair, so it is **not** the live fallback | About 2.5 s for the successful history response |
 
 A separate stricter 20B check confirmed that in-person recipient verification clears the identity concern, urgency, secrecy and impersonation hypotheses. These are small regression checks, not a comprehensive model-quality guarantee. The failed 120B live case is retained in benchmark reporting rather than counted as success.
 
 The account's response headers showed **8,000 tokens/minute and 1,000 requests/day** for each candidate. The request-limit header is a daily limit, not requests/minute. Groq's [rate-limit documentation](https://console.groq.com/docs/rate-limits) lists 30 requests/minute for the base free tier and explains that organization limits can differ. Larger advertised paid-plan limits are not assumed for this account.
 
-One history test took **58.7 seconds total** after benchmark traffic depleted the token budget, despite a 2.5-second provider response. The application uses separate model pacing, a bounded rolling conversation/history context, a two-minute pre-call cache, debounce/coalescing, response-header pacing and `Retry-After` cooldown. These reduce wasted calls but cannot eliminate account quota delays. Repeated member selection or rapid Refresh clicks do not create unlimited provider concurrency. No account upgrades or alternative accounts were created.
+One history test took **58.7 seconds total** after benchmark traffic depleted the token budget, despite a 2.5-second provider response. The application uses separate model pacing, a bounded rolling conversation/history context, a 15-minute pre-call cache, debounce/coalescing, response-header pacing and `Retry-After` cooldown. These reduce wasted calls but cannot eliminate account quota delays. Repeated member selection or rapid Refresh clicks do not create unlimited provider concurrency. No account upgrades or alternative accounts were created.
 
 Reproduce the synthetic Groq comparison:
 
@@ -71,13 +73,61 @@ A final `--repeat` continuity check produced two correct finalized utterances on
 Keep the existing Twilio credentials, Application SID, phone numbers, `PUBLIC_BACKEND_URL`, `GEMINI_API_KEY`, and development authentication. Add only backend settings:
 
 ```dotenv
+GEMINI_UPDATE_MODEL=gemini-3.5-flash-lite
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
 GROQ_PRECALL_MODEL=openai/gpt-oss-120b
-GROQ_MIN_INTERVAL_SECONDS=8
+GROQ_MIN_INTERVAL_SECONDS=1
 GROQ_DEBOUNCE_SECONDS=0.7
 TWILIO_AUDIO_QUEUE_FRAMES=250
 ```
+
+Live guidance now completes an in-flight assessment before coalescing newer member
+turns into its next request. Teller speech cannot cancel it. Gemini uses its own request
+timeout and quota cooldown; Groq pacing does not delay live requests. For pre-call Groq,
+the one-second minimum remains subject to token limits and `Retry-After`; a 429 receives at most
+one automatic retry within 60 seconds. Longer cooldowns remain visible to the teller.
+Pre-call requests include eligible past activity in a compact table, and identical
+successful history reviews share a 15-minute in-memory cache. No quota bypass or
+fabricated model fallback is used.
+
+The call initiates the new wire. Browser-created live sessions set `payment_known=false`;
+demo proposal amounts/recipients are omitted from the model context and pre-call cache key.
+Unfinished wire fixtures and their otherwise unknown recipient setup are excluded from
+pre-call/history-only input. Completed payments keep their historical lifecycle records.
+The live model learns the current amount, recipient and purpose from confirmed member
+statements, with transcript citations. Explicit manual/API payment entry remains supported.
+
+The shared live prompt includes investment/online-recipient verification and a
+legitimate closing-payment example. These examples apply by conversational evidence,
+not by member ID or the answer key. Explicit identity-verification gaps contribute
+five illustrative conversation points; possible scenarios contribute zero. A later
+supported verification answer withdraws those five points and can recommend continuing
+the review. Recorded historical flags remain visible; the teller still decides whether
+to approve or close the review.
+
+Wire questions follow the member's answers: confirm who receives the money, ask who
+provided the account/routing instructions, then ask how those instructions were checked.
+Completed steps are skipped. A house-down-payment explanation supplies purpose, not
+recipient confirmation. When the relevant checks are answered, the model uses
+CONTINUE_REVIEW with an empty question and supporting member evidence. The frontend
+shows **Seems safe** and **No further questions suggested right now.** It does not show
+this reassuring state during pending/unavailable analysis or when unresolved risk signals
+remain. Naming a bank or broker alone does not complete the verification checks.
+
+Every live wire insight carries separate `verification_checks` for `RECIPIENT_IDENTITY`
+and `PAYMENT_INSTRUCTIONS`. Confirmed checks require exact member transcript citations;
+teller questions and invented quotations cannot confirm a check. An in-person meeting
+with an agent establishes identity only. Until the member explains checking the actual
+account and routing numbers, the backend converts premature continue-review responses
+to a routine follow-up. The frontend also requires both confirmations before showing
+**Seems safe**. An incomplete procedural check adds no attention points by itself.
+
+Run `python backend/scripts/check_live_guidance.py` from the project root for an opt-in
+real Groq evaluation of M1002 and M1057: both pre-call reviews, an investment concern,
+the next verification step, an unverified closing payee, and an independent confirming
+answer. It uses synthetic transcripts and eligible records (M1057 replay cutoff:
+2026-10-19T16:45:00Z), never places calls, and writes results under ignored `.tooling/`.
 
 The selected models and pacing settings have been saved locally. `.env` remains ignored by Git. Install dependencies with `.\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt`. No new frontend package is needed.
 
@@ -121,7 +171,7 @@ Manual acceptance, still required:
 
 1. Start/restart FastAPI, ngrok and the frontend. Confirm the tunnel URL matches configuration.
 2. Select **M1002**. Wait for Groq pre-call context; a provider error must not disable calling.
-3. Check **Enable AI call assistance** to confirm both participants consent. Optionally enable transcript retention for this test using only synthetic dialogue and consenting participants.
+3. Check **Enable AI call assistance** to confirm both participants consent. Finalized transcript text and insights are saved automatically for the session summary.
 4. Click **Call Member**, allow microphone access and answer the configured phone.
 5. The call connects directly, with no app announcement or keypad step. Audio processing starts automatically after answer when dashboard consent was confirmed.
 6. Teller says “What is the purpose of your wire transfer today?” Verify a **Teller** transcript.

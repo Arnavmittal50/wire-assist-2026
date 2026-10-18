@@ -125,6 +125,12 @@ class TwilioMedia:
             raise HTTPException(409, 'A call is already prepared for this review.')
         if len(self.bindings) >= self.settings.max_sessions:
             raise HTTPException(429, 'Too many prepared calls.')
+        # Calls save finalized conversation notes, including reviews opened before
+        # retention became the default. Honor the server's storage setting.
+        if self.settings.allow_transcript_retention and not session.retain_transcript:
+            session.retain_transcript = True
+            session.revision += 1
+            self.service.repository.save(session)
         ticket = secrets.token_urlsafe(32)
         self.bindings[ticket] = Binding(ticket, session_id, time.monotonic() + 120, consented=True)
         return ticket

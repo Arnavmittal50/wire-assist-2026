@@ -83,7 +83,7 @@ async def test_real_sdk_serializes_application_pydantic_schema_before_mock_http(
     assert result.insights == [] and provider == "gemini"
     request = requests[0]
     assert request.url.host == "offline.invalid"
-    model = "gemini-3.5-flash-lite" if initial else "gemini-3.1-flash-lite"
+    model = "gemini-3.5-flash-lite"
     assert model + ":generateContent" in request.url.path
     payload = json.loads(request.content)
     generation = payload["generationConfig"]

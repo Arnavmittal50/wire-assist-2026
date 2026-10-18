@@ -9,7 +9,7 @@ from app.schemas.contracts import (Activity, ActionInput, ActionType, CreateSess
                                   Session, Segment, SessionSummary, TellerAction, TranscriptInput, now)
 from app.models.repository import SessionRepository, redact_session
 from app.services.analysis import sentence_spans
-from app.services.groq_analysis import GroqAnalysisService
+from app.services.hybrid_analysis import HybridAnalysisService
 from app.services.risk_engine import calculate_attention
 from app.services.signal_validation import denied
 from app.services.scam_reports import ScamReports
@@ -27,7 +27,7 @@ class SessionService:
         self.tasks: dict[str, asyncio.Task] = {}
         self.initial_tasks: dict[str, asyncio.Task] = {}
         self.initial_retry_after: dict[str, float] = {}
-        self.analysis = GroqAnalysisService(settings)
+        self.analysis = HybridAnalysisService(settings)
         self.scam_reports = ScamReports(settings.data_dir)
         self.ending: set[str] = set()
         self.finish_tasks: dict[str, asyncio.Task] = {}
@@ -107,12 +107,14 @@ class SessionService:
         if not member:
             raise HTTPException(404, "Member not found.")
         session = Session(**request.model_dump(), data_source=member["data_source"])
+        session.payment_known = session.mode == 'demo' or request.payment_known
         session.retain_transcript = request.retain_transcript and self.settings.allow_transcript_retention
         history = self.members.events(session.member_id, session.as_of)
-        session.attention = calculate_attention(history, session.payment, [], as_of=session.as_of)
+        session.attention = calculate_attention(history, session.payment, [], as_of=session.as_of,
+                                                payment_known=session.mode != 'live' or session.payment_known)
         if session.mode == "live":
             session.analysis_provider = "unavailable"
-            session.provider_notice = "Live analysis requested. Groq access has not yet been verified."
+            session.provider_notice = "Live analysis requested. Gemini access has not yet been verified."
         session.activity.append(Activity(description="Consented review session created."))
         self.sessions[session.session_id] = session
         self.repository.save(session)
@@ -155,8 +157,9 @@ class SessionService:
         # Unattributed live chunks and teller turns must not repeatedly cancel
         # guidance already running on confirmed member evidence.
         running = self.tasks.get(session_id)
-        keep_running = bool(running and not running.done() and session.guidance_status == 'reviewing' and not (
-            segment.speaker == 'member' and segment.diarization_status == 'CONFIRMED'))
+        keep_running = bool(running and not running.done() and session.guidance_status == 'reviewing'
+                            and (session.mode == 'live' or not (
+                                segment.speaker == 'member' and segment.diarization_status == 'CONFIRMED')))
         if not keep_running:
             session.analysis_version += 1
         session.analysis_pending = True
@@ -173,6 +176,35 @@ class SessionService:
         return session
 
     async def _analyze(self, snapshot: Session):
+        sid = snapshot.session_id
+        try:
+            while True:
+                await self._analyze_once(snapshot)
+                current = self.sessions.get(sid)
+                if (not current or current.status != 'active' or current.mode != 'live'
+                        or current.analysis_version != snapshot.analysis_version
+                        or current.guidance_status == 'unavailable'):
+                    break
+                pending = any(
+                    f'{segment.segment_id}:{index}' not in current.analyzed_sentences
+                    for segment in current.segments
+                    if segment.finalized and segment.speaker == 'member'
+                    and segment.diarization_status == 'CONFIRMED'
+                    and segment.speaker_source in {'manual', 'diarization', 'twilio_track'}
+                    for index, _ in enumerate(sentence_spans(segment.text)))
+                if not pending:
+                    break
+                # Finish the paid request already in flight, then coalesce all newer
+                # member speech into one follow-up. Continuous speech cannot starve it.
+                current.analysis_pending = True
+                current.guidance_status = 'reviewing'
+                snapshot = current.model_copy(deep=True)
+                await self.publish(current, 'insight_updated')
+        finally:
+            if self.tasks.get(sid) is asyncio.current_task():
+                self.tasks.pop(sid, None)
+
+    async def _analyze_once(self, snapshot: Session):
         sid, version = snapshot.session_id, snapshot.analysis_version
         try:
             if snapshot.mode == "live" and snapshot.segments:
@@ -264,7 +296,8 @@ class SessionService:
                 session.analysis_pending = key != work[-1][0]
                 session.guidance_status = "ready"
                 session.attention = calculate_attention(history, session.payment, session.insights,
-                                                        previous=session.attention, as_of=session.as_of)
+                                                        previous=session.attention, as_of=session.as_of,
+                                                        payment_known=session.mode != 'live' or session.payment_known)
                 session.scam_matches = self.scam_reports.match(session)
                 await self.publish(session, "insight_updated")
                 await self.emit(sid, "attention_updated", {"session": session.model_dump(mode="json")})
@@ -278,10 +311,6 @@ class SessionService:
                 session.guidance_status = "unavailable"
                 session.provider_notice = "Analysis could not complete. Review the transcript and continue with employee judgment."
                 await self.publish(session, "insight_updated")
-        finally:
-            if self.tasks.get(sid) is asyncio.current_task():
-                self.tasks.pop(sid, None)
-
     async def retry_guidance(self, session_id):
         session = self.active(session_id)
         running = self.tasks.get(session_id)
@@ -305,7 +334,8 @@ class SessionService:
             if insight.status in {"active", "acknowledged"} and insight.source_segment_ids:
                 insight.status = "superseded"
         session.attention = calculate_attention(history, session.payment, session.insights,
-                                                previous=session.attention, as_of=session.as_of)
+                                                previous=session.attention, as_of=session.as_of,
+                                                payment_known=session.mode != 'live' or session.payment_known)
 
     async def correct_speaker(self, session_id, segment_id, speaker, scope="segment"):
         session = self.active(session_id)
@@ -401,12 +431,18 @@ class SessionService:
             previous = next((i for i in reversed(session.insights) if
                              signature_of(i) == signature), None)
             if previous:
+                if previous.model_dump(exclude={'insight_id', 'status'}) != insight.model_dump(exclude={'insight_id', 'status'}):
+                    archived = previous.model_copy(deep=True)
+                    if archived.status in {'active', 'acknowledged'}:
+                        archived.status = 'superseded'
+                    session.insight_history.append(archived)
                 insight.insight_id = previous.insight_id
                 if previous.status != "superseded":
                     insight.status = previous.status
                 session.insights[session.insights.index(previous)] = insight
             else:
                 session.insights.append(insight)
+        session.insight_history.extend(session.insights[:-100])
         session.insights = session.insights[-100:]
 
     async def emit(self, session_id: str, event_type: str, payload: dict, *, target: WebSocket | None = None):
@@ -500,7 +536,8 @@ class SessionService:
         session.actions.append(TellerAction(**action_data))
         session.activity.append(Activity(description="Employee recorded: " + kind.value.replace("_", " ").lower() + " (simulation)."))
         session.attention = calculate_attention(self.members.events(session.member_id, session.as_of), session.payment,
-                                                session.insights, session.attention, as_of=session.as_of)
+                                                session.insights, session.attention, as_of=session.as_of,
+                                                payment_known=session.mode != 'live' or session.payment_known)
         await self.publish(session, "session_status")
         if resume_analysis:
             self.tasks[session_id] = asyncio.create_task(self._analyze(session.model_copy(deep=True)))
@@ -566,11 +603,20 @@ class SessionService:
 
     def summary(self, session_id: str) -> SessionSummary:
         session = self.get(session_id)
+        # Include initial guidance, previous versions, and every current status.
+        # A later status wins when the same content also exists in the initial review.
+        all_insights = [*(session.initial_analysis.insights if session.initial_analysis else []),
+                        *session.insight_history, *session.insights]
+        unique = {item.model_dump_json(exclude={'insight_id', 'status'}): item for item in all_insights}
         return SessionSummary(session_id=session_id, member_id=session.member_id, status=session.status,
                               review_outcome=session.review_outcome, created_at=session.created_at,
-                              ended_at=session.ended_at, payment=session.payment, attention=session.attention,
+                              ended_at=session.ended_at, payment=session.payment, payment_known=session.payment_known,
+                              attention=session.attention,
                               transcript_segment_count=session.segment_count,
                               transcript_retained=session.retain_transcript,
+                              transcript=session.segments,
+                              insights=list(unique.values()),
+                              scam_matches=session.scam_matches,
                               analysis_providers=sorted(session.analysis_sources),
                               initial_analysis=session.initial_analysis,
                               observations=[i.observation for i in session.insights if i.status not in {"dismissed", "superseded"}],

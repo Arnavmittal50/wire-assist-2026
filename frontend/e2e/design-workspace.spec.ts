@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { restoreDemoReview } from './helpers/review';
 
 test('Figma workspace keeps its fonts, asset geometry and controls across responsive layouts', async ({ page, request }) => {
   const backend = process.env.E2E_BACKEND_URL || 'http://127.0.0.1:8000';
@@ -9,7 +10,8 @@ test('Figma workspace keeps its fonts, asset geometry and controls across respon
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto('/');
-    await expect(page.getByRole('button', { name: 'Start review' })).toBeDisabled();
+    await expect(page.getByRole('heading', { name: 'Start a member review' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Start review' })).toHaveCount(0);
     await page.evaluate(() => document.fonts.ready);
     expect(await page.evaluate(() => document.fonts.check('700 24px "IBM Plex Mono"'))).toBe(true);
     await expect(page.locator('.workspace-grid')).toHaveCSS('gap', '16px');
@@ -22,11 +24,11 @@ test('Figma workspace keeps its fonts, asset geometry and controls across respon
       { src: '/assets/figma/wire-assist-mark.svg', loaded: true, width: 36, height: 36 },
       { src: '/assets/figma/microphone.svg', loaded: true, width: 14, height: 18 },
     ]);
-    await page.getByLabel(/The member consents/).check();
-    const created = page.waitForResponse(response => response.url().endsWith('/sessions') && response.request().method() === 'POST');
-    await page.getByRole('button', { name: 'Start review' }).click();
-    id = (await (await created).json()).session_id;
-    await expect(page.getByText('Connected', { exact: true })).toBeVisible();
+    await expect(page.locator('.member-panel .initial-review')).toBeVisible();
+    const widths = await page.locator('.workspace-grid > .workspace-panel').evaluateAll(panels => panels.map(panel => panel.getBoundingClientRect().width));
+    expect(widths[2]).toBeGreaterThan(widths[1]);
+    expect(await page.locator('main > .session-controls').evaluate(element => element.previousElementSibling?.classList.contains('support-grid'))).toBe(true);
+    id = await restoreDemoReview(page, request);
     await page.getByLabel('Transcript speaker').selectOption('member');
     await page.getByLabel('Manual transcript').fill('He told me I must send the wire in the next 30 minutes and not tell anyone.');
     await page.getByRole('button', { name: 'Add turn' }).click();

@@ -279,6 +279,7 @@ async def test_entered_payment_and_member_signals_have_independently_validated_c
     from app.schemas.contracts import Insight, Evidence, SignalObservation
     service, current = coordinator(config)
     current.payment.amount = 1000000
+    current.payment_known = True  # Explicit teller entry, unlike a new phone request.
     current.segments = [Segment(sequence=0, segment_id='s0', speaker='member', text='Send within 30 minutes.')]
     context, segments, events = _context(current, [])
     assert context['events'] == []  # Do not invent an historical transaction.

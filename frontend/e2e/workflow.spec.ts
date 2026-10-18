@@ -1,16 +1,14 @@
 import { expect, test } from '@playwright/test';
+import { restoreDemoReview } from './helpers/review';
 import type { APIRequestContext, Page } from '@playwright/test';
 
 const backend = process.env.E2E_BACKEND_URL || 'http://localhost:8000';
 const headers = { Authorization: `Bearer ${process.env.E2E_DEV_AUTH_TOKEN || 'wire-assist-local-dev'}` };
 const created = new Set<string>();
-async function start(page: Page) {
-  await page.getByLabel(/The member consents/).check();
-  const response = page.waitForResponse(response => response.url().endsWith('/sessions') && response.request().method() === 'POST');
-  await page.getByRole('button', { name: 'Start review' }).click();
-  const session = await (await response).json(); created.add(session.session_id);
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
-  return session.session_id as string;
+async function start(page: Page, request: APIRequestContext) {
+  const id = await restoreDemoReview(page, request);
+  created.add(id);
+  return id;
 }
 async function addTurn(page: Page, text: string, speaker = 'member') {
   await page.getByLabel('Transcript speaker').selectOption(speaker);
@@ -30,12 +28,12 @@ test('complete manual review with microphone lifecycle, evidence, decisions, sum
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   await page.goto('/');
-  await expect(page.getByRole('button', { name: 'Start review' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Start review' })).toHaveCount(0);
   await expect(page.getByText('$87.95', { exact: true }).first()).toBeVisible();
   await page.getByLabel('SYNTHETIC MEMBER').selectOption('M1001');
   await expect(page.getByLabel('SYNTHETIC MEMBER')).toHaveValue('M1001');
   await page.getByRole('button', { name: 'M1002 · Sep 26' }).click();
-  const id = await start(page);
+  const id = await start(page, request);
   await expect(page.getByRole('heading', { name: 'What we know', exact: true })).toBeVisible();
   const initial = await (await request.get(`${backend}/sessions/${id}`, { headers })).json();
   expect(initial.initial_analysis.provider).toBe('demo');
@@ -77,7 +75,7 @@ test('complete manual review with microphone lifecycle, evidence, decisions, sum
   await expect(page.getByRole('heading', { name: 'Conversation text was not retained.' })).toBeVisible();
   await page.getByRole('button', { name: 'Delete session data' }).click();
   await page.getByRole('button', { name: 'Permanently delete session' }).click();
-  await expect(page.getByRole('button', { name: 'Start review' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ready for a conversation' })).toBeVisible();
   expect((await request.get(`${backend}/sessions/${id}`, { headers })).status()).toBe(404);
   created.delete(id);
   expect(errors).toEqual([]);
@@ -89,7 +87,7 @@ test('M1057 review preset works at its as-of date and the dashboard remains usab
   await page.getByRole('button', { name: 'M1057 · Oct 19' }).click();
   await expect(page.getByLabel('SYNTHETIC MEMBER')).toHaveValue('M1057');
   await expect(page.locator('.payment-heading').getByText('$51,586.52', { exact: false })).toBeVisible();
-  const id = await start(page);
+  const id = await start(page, request);
   const session = await (await request.get(`${backend}/sessions/${id}`, { headers })).json();
   expect(session.as_of).toContain('2026-10-19T16:41:00');
   expect(session.payment.recipient_id).toBe('R1057-10');

@@ -42,7 +42,8 @@ async def test_family_conversation_has_identity_concern_without_urgency_secrecy_
     kinds = {s.signal_type for i in result.insights for s in i.signals if s.status != 'NOT_ESTABLISHED'}
     assert 'IDENTITY_VERIFICATION_NEEDED' in kinds
     assert not kinds & {'TIME_PRESSURE', 'SECRECY', 'INVESTMENT_RISK'}
-    assert calculate_attention([], Payment(), result.insights).score == 0
+    # A described verification gap merits a small probe, not an urgency/scam escalation.
+    assert calculate_attention([], Payment(), result.insights).score == 5
     if mode == 'demo':
         assert {'LARGE_TRANSACTION', 'POSSIBLE_IMPERSONATION'} <= kinds
         assert all(s.status == 'POSSIBLE' for i in result.insights for s in i.signals if s.signal_type == 'POSSIBLE_IMPERSONATION')

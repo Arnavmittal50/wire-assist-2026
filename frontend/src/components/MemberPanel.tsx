@@ -9,6 +9,8 @@ interface Props {
   onSelect: (id: string) => void;
   disabled: boolean;
   payment: Payment;
+  paymentKnown?: boolean;
+  conversationStarted?: boolean;
   asOf: string;
   eventCount: number;
   loading: boolean;
@@ -16,8 +18,9 @@ interface Props {
   children: ReactNode;
 }
 
-export function MemberPanel({ members, memberId, onSelect, disabled, payment, asOf, eventCount, loading, newRecipient, children }: Props) {
+export function MemberPanel({ members, memberId, onSelect, disabled, payment, paymentKnown = true, conversationStarted = false, asOf, eventCount, loading, newRecipient, children }: Props) {
   return <section className="member-panel workspace-panel" aria-labelledby="member-heading">
+    {children}
     <div className="card-heading"><h2 id="member-heading">Member information</h2><Badge tone="neutral">Synthetic</Badge></div>
     <div className="member-profile">
       <label htmlFor="member-select" className="sr-only">SYNTHETIC MEMBER</label>
@@ -33,15 +36,15 @@ export function MemberPanel({ members, memberId, onSelect, disabled, payment, as
     </div>
     <section className="payment-panel" aria-labelledby="payment-heading">
       <div className="card-heading"><h2 id="payment-heading">{payment.rail} request</h2>{newRecipient && <Badge tone="amber">New recipient</Badge>}</div>
-      <div className="payment-body">
+      <div className="payment-body">{paymentKnown ? <>
         <div className="payment-heading"><strong>{money(payment.amount)}</strong></div>
         <dl className="payment-facts">
           <div><dt>Recipient</dt><dd>{payment.recipient_id || 'Not entered'}</dd></div>
           <div><dt>Payment rail</dt><dd>{payment.rail}</dd></div>
           <div><dt>Purpose</dt><dd>{payment.purpose || 'Not provided'}</dd></div>
         </dl>
+      </> : <p className="fine-print">{conversationStarted ? 'Live guidance uses the amount, recipient and purpose shared in this conversation.' : 'The customer will tell you the amount, who they are paying, and why during the call. Live guidance follows that conversation.'}</p>}
       </div>
     </section>
-    {children}
   </section>;
 }

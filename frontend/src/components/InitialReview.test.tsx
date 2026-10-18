@@ -1,9 +1,27 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { InitialReview } from './InitialReview';
 import { makeSession, demoInsight } from '../test/fixtures';
 
 describe('initial member review', () => {
+  it('keeps each real evidence flag with its related insight and preserves unrelated flags and actions', () => {
+    const session = makeSession({ initial_analysis: { provider: 'demo', model: null, notice: 'Demo.', event_count: 1,
+      summary: [], insights: [demoInsight] } });
+    const flag = { signal_id: 'urgency', code: 'URGENCY', title: 'A deadline was reported', points: 20,
+      evidence: demoInsight.evidence, status: 'active' as const, origin: 'conversation' as const };
+    const other = { ...flag, signal_id: 'new', code: 'NEW_RECIPIENT', title: 'A new recipient was recorded',
+      evidence: [{ source_id: 'E2', source_type: 'event' as const, quote: 'new_recipient: true' }] };
+    const resolve = vi.fn();
+    render(<InitialReview embedded session={session} attention={{ ...session.attention, signals: [flag, other] }} onResolve={resolve} />);
+    const question = screen.getByText(demoInsight.suggested_question).closest('li')!;
+    expect(within(question).getByText(flag.title)).toBeVisible();
+    expect(within(question).queryByText(other.title)).not.toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: flag.title })).toHaveLength(1);
+    expect(screen.getByRole('region', { name: 'Additional evidence flags' })).toHaveTextContent(other.title);
+    fireEvent.click(within(question).getByText('Evidence & actions'));
+    fireEvent.click(within(question).getByRole('button', { name: 'Resolve' }));
+    expect(resolve).toHaveBeenCalledWith(flag);
+  });
   it('puts facts and the suggested opening question ahead of expandable details', () => {
     render(<InitialReview session={makeSession({ initial_analysis: {
       provider: 'gemini', model: 'test-model', notice: 'Review complete.', event_count: 37,

@@ -8,27 +8,40 @@ import type { Insight, Segment } from './types/api';
 const members = [{ member_id: 'M1002', label: 'Member M1002', data_source: 'huskyhack_csv' }, { member_id: 'M1057', label: 'Member M1057', data_source: 'huskyhack_csv' }];
 const event = { event_id: 'E1', member_id: 'M1002', timestamp: '2026-09-08T12:00:00Z', event_type: 'P2P', amount: 87.95, channel: 'P2P', recipient_id: 'R1', description: 'Recorded payment' };
 beforeEach(() => {
-  vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200, json: async () => url.endsWith('/health') ? { status: 'ok', analysis_provider: 'demo', transcription_provider: 'manual', data_source: 'huskyhack_csv' } : url.endsWith('/members') ? members : [event] })));
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200, json: async () => url.endsWith('/health') ? { status: 'ok', analysis_provider: 'demo', transcription_provider: 'manual', data_source: 'huskyhack_csv' } : url.endsWith('/members') ? members : url.endsWith('/pre-analysis') ? { provider: 'demo', model: null, notice: 'Demo review.', event_count: 1, insights: [], summary: [] } : [event] })));
 });
 afterEach(() => vi.unstubAllGlobals());
 
 describe('workspace', () => {
-  it('does not overwrite a chosen mode when backend discovery finishes later', async () => {
+  it('reviews history without sending a proposed wire and keeps payment details unknown before a live call', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200,
+      json: async () => url.endsWith('/health') ? { status: 'ok', analysis_provider: 'gemini', transcription_provider: 'gemini_live', data_source: 'test' }
+        : url.endsWith('/members') ? members : url.endsWith('/pre-analysis') ? { provider: 'groq', model: 'test', notice: 'Past activity.', event_count: 1, insights: [], summary: [] } : [event] })));
+    render(<App />);
+    await screen.findByRole('option', { name: 'Member M1002' });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/pre-analysis'))).toBe(true));
+    const request = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/pre-analysis'))!;
+    const body = JSON.parse(String((request[1] as RequestInit).body));
+    expect(body).not.toHaveProperty('payment');
+    expect(screen.getByRole('region', { name: 'Wire request' })).not.toHaveTextContent('$1,500');
+    expect(screen.getByRole('region', { name: 'Wire request' })).toHaveTextContent('The customer will tell you the amount');
+  });
+  it('discovers live availability without showing the manual review panel', async () => {
     let resolveHealth!: (value: unknown) => void;
     const health = new Promise(resolve => { resolveHealth = resolve; });
     vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200,
-      json: async () => url.endsWith('/health') ? health : url.endsWith('/members') ? members : [event] })));
+      json: async () => url.endsWith('/health') ? health : url.endsWith('/members') ? members : url.endsWith('/pre-analysis') ? { provider: 'demo', model: null, notice: 'Demo review.', event_count: 1, insights: [], summary: [] } : [event] })));
     render(<App />);
-    fireEvent.change(screen.getByLabelText('Analysis mode'), { target: { value: 'demo' } });
+    expect(screen.queryByRole('heading', { name: 'Start a member review' })).not.toBeInTheDocument();
     resolveHealth({ status: 'ok', analysis_provider: 'gemini', transcription_provider: 'gemini_live', data_source: 'huskyhack_csv' });
     await screen.findByRole('option', { name: 'Member M1002' });
-    expect(screen.getByLabelText('Analysis mode')).toHaveValue('demo');
+    expect(screen.getByText('LIVE MODE')).toBeVisible();
   });
   it('loads synthetic members and displays real API history', async () => {
     render(<App />);
     await screen.findByRole('option', { name: 'Member M1002' });
     expect(await screen.findByText('$87.95')).toBeVisible();
-    expect(screen.getByRole('button', { name: /Start review/ })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Start review/ })).not.toBeInTheDocument();
     expect(screen.getByText('DEMO MODE')).toBeVisible();
   });
   it('changes the selected member and requests their as-of history', async () => {
@@ -37,11 +50,15 @@ describe('workspace', () => {
     fireEvent.change(screen.getByLabelText('SYNTHETIC MEMBER'), { target: { value: 'M1057' } });
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/members/M1057/events?as_of='), expect.anything()));
   });
-  it('enables session creation only after explicit consent', async () => {
+  it('keeps AI consent available without creating a review from toggling it', async () => {
     render(<App />);
     await screen.findByRole('option', { name: 'Member M1002' });
-    fireEvent.click(screen.getByLabelText(/The member consents/));
-    expect(screen.getByRole('button', { name: /Start review/ })).toBeEnabled();
+    const consent = screen.getByLabelText(/Enable AI call assistance/);
+    expect(consent).not.toBeChecked();
+    fireEvent.click(consent);
+    expect(consent).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Call Member' })).toBeEnabled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/sessions'))).toBe(false);
   });
 });
 

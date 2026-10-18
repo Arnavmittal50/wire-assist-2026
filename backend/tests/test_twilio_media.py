@@ -73,6 +73,7 @@ def test_dashboard_consent_starts_stream_on_answer_without_phone_prompts(twilio_
     assert root.find('.//Stream') is None
     assert root.find('.//Gather') is None and root.find('.//Say') is None
     assert 'url' not in root.find('./Dial/Number').attrib
+    assert client.post('/twilio/ai-notice').status_code == 404
     assert media.bindings[ticket].consented
     media.start_stream.assert_not_called()
     signed(client, config, '/twilio/status', {'CallSid': CHILD, 'ParentCallSid': PARENT, 'CallStatus': 'ringing', 'SequenceNumber': '1'})
@@ -156,6 +157,22 @@ async def test_two_tracks_independent_transcripts_cleanup(media_setup):
     assert all(s.call_sid == PARENT and s.stream_sid == STREAM and s.speaker_source == 'twilio_track'
                and s.diarization_status == 'CONFIRMED' and s.is_final for s in session.segments)
     assert all(t.done() for t in b.workers)
+    await media.end(b)
+    summary = service.summary(session.session_id)
+    assert summary.status == 'ended' and summary.transcript_retained
+    assert [s.text for s in summary.transcript] == ['Teller question.', 'Member answer.']
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_preparing_an_older_call_review_enables_durable_retention(config):
+    app = create_app(config)
+    service = app.state.service
+    session = service.create(CreateSession(member_id='M1002', consent=True, mode='live', retain_transcript=False))
+    app.state.twilio_media.prepare(session.session_id)
+    assert session.retain_transcript
+    assert service.repository.load_all()[0].retain_transcript
+    await app.state.twilio_media.shutdown()
     await service.shutdown()
 
 

@@ -21,6 +21,29 @@ PACIFIC = ZoneInfo("America/Los_Angeles")
 DEFAULT_AS_OF = datetime(2026, 9, 27, 2, 25, tzinfo=timezone.utc)
 
 
+def history_before_wire_request(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Withhold unfinished wire fixtures representing a request initiated on the call.
+
+    Completed payments keep their lifecycle rows. Withhold recipient setup belonging
+    only to unfinished wires too. Callers first enforce the member and replay cutoff.
+    """
+    ordered = sorted(events, key=lambda event: (event['timestamp'], event.get('event_sequence', 0)))
+    latest = {}
+    for event in ordered:
+        if event.get('payment_id') and event.get('status'):
+            latest[event['payment_id']] = event['status']
+    requests = [event for event in ordered if event.get('event_type') == 'Payment Initiated'
+                and event.get('payment_rail') == 'Wire' and event.get('transaction_direction') == 'Outgoing'
+                and latest.get(event.get('payment_id'), event.get('status')) in {'Pending', 'Held'}]
+    hidden_ids = {event['payment_id'] for event in requests if event.get('payment_id')}
+    hidden_events = {event['event_id'] for event in requests}
+    established = {event.get('recipient_id') for event in ordered if event.get('status') == 'Completed'}
+    new_recipients = {event.get('recipient_id') for event in requests} - established - {None}
+    return [event for event in ordered if event.get('payment_id') not in hidden_ids
+            and event['event_id'] not in hidden_events
+            and not (event.get('event_type') == 'Recipient Added' and event.get('recipient_id') in new_recipients)]
+
+
 def _optional_number(value: str, integer: bool = False) -> int | float | None:
     if not value.strip():
         return None

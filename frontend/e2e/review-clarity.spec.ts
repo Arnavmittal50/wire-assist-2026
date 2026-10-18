@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { restoreDemoReview } from './helpers/review';
 
 test('history is readable and a speaker correction removes the mistaken signal', async ({ page, request }) => {
   const backend = process.env.E2E_BACKEND_URL || 'http://localhost:8000';
@@ -7,11 +8,7 @@ test('history is readable and a speaker correction removes the mistaken signal',
   try {
     await page.goto('/');
     await page.getByRole('button', { name: 'M1002 · Sep 26' }).click();
-    await page.getByLabel('Analysis mode').selectOption('demo');
-    await page.getByLabel(/The member consents/).check();
-    const created = page.waitForResponse(response => response.url().endsWith('/sessions') && response.request().method() === 'POST');
-    await page.getByRole('button', { name: 'Start review' }).click();
-    id = (await (await created).json()).session_id;
+    id = await restoreDemoReview(page, request);
     await expect(page.getByRole('heading', { name: 'What we know' })).toBeVisible();
     await expect(page.getByText('ASK FIRST')).toBeVisible();
     await expect(page.getByText('How did you confirm the recipient details for this payment?', { exact: true }).first()).toBeVisible();

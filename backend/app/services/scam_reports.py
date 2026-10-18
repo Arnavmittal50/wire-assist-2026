@@ -44,6 +44,7 @@ class ScamReport:
     payment_methods: str
     dollars_lost: float | None
     narrative: str
+    is_synthetic: bool = False
 
     @property
     def tokens(self) -> set[str]:
@@ -62,13 +63,14 @@ class ScamReports:
                 self.reports.append(ScamReport(
                     report_id=row["report_id"], scam_type=row["scam_type"], persona=row.get("persona", ""),
                     payment_methods=row.get("payment_methods", ""),
-                    dollars_lost=float(loss) if loss else None, narrative=row.get("narrative", "")))
+                    dollars_lost=float(loss) if loss else None, narrative=row.get("narrative", ""),
+                    is_synthetic=row.get('is_synthetic', '').strip().lower() == 'true'))
 
     def match(self, session: Session) -> list[ScamMatch]:
-        speech = [s for s in session.segments if s.finalized and s.speaker in {"member", "unknown"}]
+        speech = [s for s in session.segments if s.finalized and s.speaker == "member" and s.diarization_status == "CONFIRMED"]
         codes = {s.code for s in session.attention.signals if s.origin == "conversation" and s.status == "active"}
         # Check at a meaningful point: a conversation risk cue appeared, or enough has been said.
-        if not self.reports or not (codes or len(speech) >= MIN_MEMBER_TURNS):
+        if not self.reports or not speech or not (codes or len(speech) >= MIN_MEMBER_TURNS):
             return []
         spoken = _tokens(" ".join(s.text for s in speech))
         rail_words = RAIL_METHODS.get(session.payment.rail, ())
@@ -92,5 +94,6 @@ class ScamReports:
         scored.sort(key=lambda row: row[0], reverse=True)
         return [ScamMatch(report_id=r.report_id, scam_type=r.scam_type, persona=r.persona,
                           payment_methods=r.payment_methods, dollars_lost=r.dollars_lost,
-                          summary=r.narrative[:400], similarity=round(min(score, 1), 2), reasons=reasons)
+                          summary=r.narrative[:400], similarity=round(min(score, 1), 2), reasons=reasons,
+                          is_synthetic=r.is_synthetic)
                 for score, r, reasons in scored[:MAX_MATCHES]]

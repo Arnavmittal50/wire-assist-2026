@@ -46,9 +46,18 @@ class CreateSession(StrictModel):
     member_id: str = Field(min_length=1, max_length=50)
     as_of: datetime = datetime(2026, 9, 27, 2, 25, tzinfo=timezone.utc)
     consent: bool
-    retain_transcript: bool = False
+    retain_transcript: bool = True
     mode: Literal["demo", "live"] = "demo"
     payment: Payment = Field(default_factory=Payment)
+    payment_known: bool = False
+
+    @model_validator(mode='before')
+    @classmethod
+    def entered_payment(cls, data):
+        # Preserve explicit API/manual payment entry; browser calls send false.
+        if isinstance(data, dict) and 'payment' in data and 'payment_known' not in data:
+            data = {**data, 'payment_known': True}
+        return data
 
     @field_validator("as_of")
     @classmethod
@@ -127,6 +136,12 @@ class SignalObservation(StrictModel):
     suggested_question: str = Field(min_length=1, max_length=600)
 
 
+class VerificationCheck(StrictModel):
+    check_type: Literal['RECIPIENT_IDENTITY', 'PAYMENT_INSTRUCTIONS']
+    status: Literal['CONFIRMED', 'NOT_ESTABLISHED']
+    evidence: list[Evidence] = Field(default_factory=list, max_length=4)
+
+
 class Insight(StrictModel):
     insight_id: str = Field(default_factory=uid)
     title: str = Field(max_length=140)
@@ -141,6 +156,7 @@ class Insight(StrictModel):
     requires_human_review: bool = True
     signal_codes: list[str] = Field(default_factory=list, max_length=8)
     signals: list[SignalObservation] = Field(default_factory=list, max_length=7)
+    verification_checks: list[VerificationCheck] = Field(default_factory=list, max_length=2)
     status: Literal["active", "acknowledged", "dismissed", "resolved", "superseded"] = "active"
     provider: Literal["demo", "gemini", "groq"] = "demo"
 
@@ -211,6 +227,7 @@ class ScamMatch(StrictModel):
     summary: str = Field(max_length=400)
     similarity: float = Field(ge=0, le=1)
     reasons: list[str] = Field(default_factory=list, max_length=6)
+    is_synthetic: bool = False
 
 
 class Session(StrictModel):
@@ -221,6 +238,8 @@ class Session(StrictModel):
     retain_transcript: bool
     mode: Literal["demo", "live"]
     payment: Payment
+    # Existing saved/manual reviews contain an entered payment; new calls opt out.
+    payment_known: bool = True
     created_at: datetime = Field(default_factory=now)
     ended_at: datetime | None = None
     status: Literal["active", "ended"] = "active"
@@ -245,6 +264,7 @@ class Session(StrictModel):
     segment_count: int = 0
     next_sequence: int = 0
     insights: list[Insight] = Field(default_factory=list)
+    insight_history: list[Insight] = Field(default_factory=list)
     attention: Attention = Field(default_factory=Attention)
     scam_matches: list[ScamMatch] = Field(default_factory=list)
     actions: list[TellerAction] = Field(default_factory=list)
@@ -273,9 +293,13 @@ class SessionSummary(StrictModel):
     created_at: datetime
     ended_at: datetime | None
     payment: Payment
+    payment_known: bool = True
     attention: Attention
     transcript_segment_count: int
     transcript_retained: bool
+    transcript: list[Segment] = Field(default_factory=list)
+    insights: list[Insight] = Field(default_factory=list)
+    scam_matches: list[ScamMatch] = Field(default_factory=list)
     analysis_providers: list[str]
     initial_analysis: InitialAnalysis | None = None
     observations: list[str]

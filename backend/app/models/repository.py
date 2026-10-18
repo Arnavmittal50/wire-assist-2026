@@ -1,6 +1,6 @@
 """SQLite snapshots and transcript receipts for the local, single-process demo.
 
-Transcript retention is opt-in. A detached snapshot removes conversation text
+Transcript retention follows the session setting. A detached snapshot removes conversation text
 and freeform notes before serialization, while in-memory review remains usable.
 Receipt fingerprints permit idempotent retries after restart without storing
 transcript plaintext. This repository is not a production encrypted vault.
@@ -33,9 +33,10 @@ def redact_session(session: Session) -> Session:
     if saved.retain_transcript:
         return saved
     saved.segments = []
+    saved.scam_matches = []
     saved.payment.purpose = ""
     saved.provider_notice = "Transcript text is not retained. Provider labels identify the analysis source."
-    for insight in saved.insights:
+    for insight in [*saved.insights, *saved.insight_history]:
         insight.title = "Observation text not retained"
         insight.observation = REDACTED
         insight.suggested_question = REDACTED

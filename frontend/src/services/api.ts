@@ -23,12 +23,12 @@ export class ApiClient {
     return response.status === 204 ? undefined as T : response.json() as Promise<T>;
   }
   health = () => this.request<Health>('/health');
-  preAnalysis = (input: CreateSession) => this.request<InitialAnalysis>(`/members/${encodeURIComponent(input.member_id)}/pre-analysis`, 'POST', input, 90000);
+  preAnalysis = (input: Omit<CreateSession, 'payment'>) => this.request<InitialAnalysis>(`/members/${encodeURIComponent(input.member_id)}/pre-analysis`, 'POST', input, 90000);
   prepareCall = (sessionId: string) => this.request<{ ticket: string }>('/api/twilio/prepare', 'POST', { session_id: sessionId, participants_consent: true });
   twilioToken = () => this.request<{ token: string; identity: string; expires_in: number }>('/api/twilio/token');
   twilioCallStatus = (sid: string) => this.request<{ status: string; connected_at: string | null; ended_at: string | null }>(`/api/twilio/calls/${encodeURIComponent(sid)}`, 'GET', undefined, 5000);
   members = () => this.request<Member[]>('/members');
-  events = (id: string, asOf: string) => this.request<FinancialEvent[]>(`/members/${encodeURIComponent(id)}/events?as_of=${encodeURIComponent(asOf)}`);
+  events = (id: string, asOf: string) => this.request<FinancialEvent[]>(`/members/${encodeURIComponent(id)}/events?as_of=${encodeURIComponent(asOf)}&history_only=true`);
   createSession = (input: CreateSession) => this.request<Session>('/sessions', 'POST', input);
   session = (id: string) => this.request<Session>(`/sessions/${id}`);
   sessions = () => this.request<Session[]>('/sessions');

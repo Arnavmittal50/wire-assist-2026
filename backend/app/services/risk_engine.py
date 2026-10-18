@@ -20,12 +20,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.schemas.contracts import Attention, Evidence, Insight, Payment, Signal
+from app.services.member_data import history_before_wire_request
 
 
 CONVERSATION_RULES: dict[str, tuple[int, str]] = {
     "TIME_PRESSURE": (8, "Time pressure described in the conversation"),
     "LARGE_TRANSACTION": (0, "Large transaction amount described; size alone is not fraud"),
-    "IDENTITY_VERIFICATION_NEEDED": (0, "Recipient identity needs independent verification"),
+    "IDENTITY_VERIFICATION_NEEDED": (5, "Recipient identity needs independent verification"),
     "INVESTMENT_RISK": (15, "Investment return promise needs review"),
     "UNUSUAL_PAYMENT_PATTERN": (0, "Unusual pattern described; scored separately from records"),
     "URGENCY": (8, "Time pressure described in the conversation"),
@@ -66,12 +67,15 @@ def calculate_attention(
     previous: Attention | None = None,
     *,
     as_of: datetime | None = None,
+    payment_known: bool = True,
 ) -> Attention:
     if as_of is not None and as_of.tzinfo is None:
         raise ValueError("as_of must include a timezone")
     cutoff = as_of or max((_time(event) for event in events), default=datetime.now(timezone.utc))
     cutoff = cutoff.astimezone(timezone.utc)
     observed = sorted((event for event in events if _time(event) <= cutoff), key=_time)
+    if not payment_known:
+        observed = history_before_wire_request(observed)
     recent = [event for event in observed if _time(event) >= cutoff - timedelta(days=30)]
     signals: dict[str, Signal] = {}
     previous_by_code = {(signal.origin, signal.code): signal for signal in (previous.signals if previous else [])}
@@ -105,7 +109,7 @@ def calculate_attention(
         and event.get("recipient_id") == (payment.recipient_id or None)
         and abs((event.get("amount") or 0) - payment.amount) < 0.005
     ]
-    current = matching[-1] if matching else None
+    current = matching[-1] if matching and payment_known else None
     if current:
         lifecycle = [event for event in observed if current.get("payment_id") and event.get("payment_id") == current["payment_id"]]
         latest_status = lifecycle[-1].get("status") if lifecycle else current.get("status")
@@ -126,7 +130,7 @@ def calculate_attention(
             add("UNUSUAL_AMOUNT", f"Recorded payment is {ratio:g} times its historical baseline", 20 if ratio > 4 else 10,
                 [_evidence(current, "amount"), _evidence(current, "amount_to_baseline_ratio")])
 
-    recipient_events = [event for event in recent if payment.recipient_id and event.get("recipient_id") == payment.recipient_id]
+    recipient_events = [event for event in recent if payment_known and payment.recipient_id and event.get("recipient_id") == payment.recipient_id]
     if recipient_events:
         recipient = recipient_events[-1]
         age = recipient.get("recipient_age_days")

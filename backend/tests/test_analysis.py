@@ -46,7 +46,8 @@ def event(**overrides):
 
 
 def service(result=None, *, response_text=None, timeout=30, review_result=None):
-    settings = Settings(_env_file=None, gemini_api_key="secret-not-for-output", provider_timeout_seconds=timeout, guidance_review_pass=True)
+    settings = Settings(_env_file=None, gemini_api_key="secret-not-for-output", provider_timeout_seconds=timeout, guidance_review_pass=True,
+                        gemini_update_model="gemini-3.1-flash-lite")  # Exercise the legacy tiered fallback explicitly.
     generate = AsyncMock(return_value=SimpleNamespace(
         text=response_text if response_text is not None else json.dumps(result or {"insights": []})
     ))

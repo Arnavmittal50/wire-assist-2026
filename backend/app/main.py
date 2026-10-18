@@ -16,7 +16,7 @@ from app.core.config import Settings
 from app.schemas.contracts import ActionInput, AudioControl, CreateSession, Session, SessionSummary, TranscriptInput, SpeakerCorrection
 from app.services.audio import AudioCoordinator, AudioFormatError, AudioRateError
 from app.services.transcription import TranscriptionUnavailable
-from app.services.member_data import MemberData
+from app.services.member_data import MemberData, history_before_wire_request
 from app.services.sessions import SessionService
 from app.services.twilio_calling import create_twilio_router, public_origin
 from app.services.twilio_media import TwilioMedia
@@ -76,10 +76,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "analysis_provider": "groq" if config.groq_api_key else "unavailable",
+        return {"status": "ok", "analysis_provider": "gemini" if config.gemini_api_key else "unavailable",
+                "precall_provider": "groq" if config.groq_api_key else "unavailable",
                 "transcription_provider": "gemini_live" if config.gemini_api_key else "manual",
                 "analysis_model": config.groq_precall_model,
-                "update_model": config.groq_model,
+                "update_model": config.gemini_update_model,
                 "transcription_model": config.gemini_transcription_model,
                 "data_source": members.members()[0]["data_source"] if members.members() else "empty",
                 "provider_verified": False}
@@ -96,11 +97,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return member
 
     @app.get("/members/{member_id}/events", dependencies=[Depends(authorize)])
-    def events(member_id: str, as_of: datetime = datetime(2026, 9, 27, 2, 25, tzinfo=timezone.utc)):
+    def events(member_id: str, as_of: datetime = datetime(2026, 9, 27, 2, 25, tzinfo=timezone.utc), history_only: bool = False):
         get_member(member_id)
         if as_of.tzinfo is None:
             raise HTTPException(422, "as_of must include a timezone.")
-        return members.events(member_id, as_of)
+        rows = members.events(member_id, as_of)
+        return history_before_wire_request(rows) if history_only else rows
 
     @app.post("/members/{member_id}/pre-analysis", dependencies=[Depends(authorize)])
     async def pre_analysis(member_id: str, request: CreateSession):
@@ -108,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "Member mismatch.")
         member = get_member(member_id)
         # Synthetic history only. This does not grant audio-processing consent.
-        preview = Session(**{**request.model_dump(), "consent": True, "mode": "live"}, data_source=member["data_source"])
+        preview = Session(**{**request.model_dump(), "consent": True, "mode": "live", "payment_known": False}, data_source=member["data_source"])
         return await service.analysis.initialize(preview, members.events(member_id, request.as_of))
 
     @app.post("/sessions", response_model=Session, dependencies=[Depends(authorize)])
