@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import time
 from contextlib import suppress
 from fastapi import HTTPException, WebSocket
 
@@ -9,6 +10,7 @@ from app.schemas.contracts import (Activity, ActionInput, ActionType, CreateSess
 from app.models.repository import SessionRepository, redact_session
 from app.services.analysis import AnalysisService, sentence_spans
 from app.services.risk_engine import calculate_attention
+from app.services.signal_validation import denied
 
 
 class SessionService:
@@ -22,6 +24,7 @@ class SessionService:
         self.connections: dict[str, set[WebSocket]] = {}
         self.tasks: dict[str, asyncio.Task] = {}
         self.initial_tasks: dict[str, asyncio.Task] = {}
+        self.initial_retry_after: dict[str, float] = {}
         self.analysis = AnalysisService(settings)
         self.ending: set[str] = set()
         self.finish_tasks: dict[str, asyncio.Task] = {}
@@ -46,30 +49,43 @@ class SessionService:
         if current is not session or session.status != "active":
             return
         session.initial_analysis = baseline
+        if baseline.provider == "unavailable":
+            self.initial_retry_after[session_id] = time.monotonic() + self.settings.provider_retry_cooldown_seconds
+        else:
+            self.initial_retry_after.pop(session_id, None)
         if baseline.provider not in session.analysis_sources:
             session.analysis_sources.append(baseline.provider)
         # Initial hypotheses never undo a human decision made while the model was running.
-        if session.analysis_version == 0:
-            session.insights.extend(i.model_copy(deep=True) for i in baseline.insights)
+        if not session.analyzed_sentences and session.review_outcome != "legitimate":
+            self._merge_insights(session, [i.model_copy(deep=True) for i in baseline.insights])
+        if (not session.analyzed_sentences and session.review_outcome != "legitimate"
+                and session.guidance_status != "unavailable"):
             session.analysis_provider = baseline.provider
             session.provider_notice = baseline.notice
         await self.publish(session, "insight_updated")
 
-    async def _ensure_initial(self, session_id: str):
+    def _initial_task(self, session_id):
         session = self.get(session_id)
-        if session.initial_analysis is not None:
-            return
+        if session.initial_analysis is not None and not (session.mode == 'live' and session.initial_analysis.provider != 'gemini'):
+            return None
+        if time.monotonic() < self.initial_retry_after.get(session_id, 0):
+            return None
         task = self.initial_tasks.get(session_id)
         if task is None:
             task = asyncio.create_task(self._initialize(session_id))
             self.initial_tasks[session_id] = task
-            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-        # A new sentence can replace the update worker without restarting the expensive baseline.
-        try:
+            def completed(done):
+                if not done.cancelled():
+                    done.exception()
+                if self.initial_tasks.get(session_id) is done:
+                    self.initial_tasks.pop(session_id, None)
+            task.add_done_callback(completed)
+        return task
+
+    async def _ensure_initial(self, session_id):
+        task = self._initial_task(session_id)
+        if task is not None:
             await asyncio.shield(task)
-        finally:
-            if task.done() and self.initial_tasks.get(session_id) is task:
-                self.initial_tasks.pop(session_id, None)
 
     def active(self, session_id: str, *, allow_ending=False) -> Session:
         session = self.get(session_id)
@@ -106,7 +122,7 @@ class SessionService:
         payload = {"session": session.model_dump(mode="json"), **(extra or {})}
         await self.emit(session.session_id, event_type, payload)
 
-    async def transcript(self, session_id: str, request: TranscriptInput, source="manual") -> Session:
+    async def transcript(self, session_id: str, request: TranscriptInput, source="manual", metadata=None) -> Session:
         session = self.active(session_id, allow_ending=source == "gemini")
         fingerprint = hashlib.sha256(json.dumps(request.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
         receipt = self.repository.segment_receipt(session_id, request.segment_id)
@@ -123,19 +139,30 @@ class SessionService:
             raise HTTPException(409, "This transcript sequence already exists. Refresh and retry.")
         if session.segment_count >= self.settings.max_segments:
             raise HTTPException(422, "This demonstration session reached its transcript limit.")
-        segment = Segment(**request.model_dump(), source=source)
+        data = request.model_dump()
+        if data['speaker'] == 'auto':
+            data['speaker'] = 'unknown'
+        segment = Segment(**data, source=source, session_id=session_id, **(metadata or {}))
         session.segments.append(segment)
         session.segments.sort(key=lambda s: (s.sequence, s.segment_id))
         session.segment_count += 1
         session.next_sequence = max(session.next_sequence, request.sequence + 1)
         if session.review_outcome == "legitimate":
             session.review_outcome = "in_review"
-        session.analysis_version += 1
+        # Unattributed live chunks and teller turns must not repeatedly cancel
+        # guidance already running on confirmed member evidence.
+        running = self.tasks.get(session_id)
+        keep_running = bool(running and not running.done() and session.guidance_status == 'reviewing' and not (
+            segment.speaker == 'member' and segment.diarization_status == 'CONFIRMED'))
+        if not keep_running:
+            session.analysis_version += 1
         session.analysis_pending = True
         session.activity.append(Activity(description="Finalized conversation turn received."))
         self.repository.save(session, receipt={"segment_id": request.segment_id,
                                               "sequence": request.sequence, "fingerprint": fingerprint})
         await self.publish(session, "transcript_final", {"segment": segment.model_dump(mode="json")})
+        if keep_running:
+            return session
         previous = self.tasks.pop(session_id, None)
         if previous:
             previous.cancel()
@@ -147,14 +174,20 @@ class SessionService:
         try:
             await self.emit(sid, "analysis_started", {"analysis_version": version})
             history = self.members.events(snapshot.member_id, snapshot.as_of)
-            await self._ensure_initial(sid)
             session = self.sessions.get(sid)
             if not session or session.status != "active" or session.analysis_version != version:
+                return
+            if snapshot.mode == 'live' and snapshot.segments:
+                # History remains independently visible; do not delay live guidance.
+                self._initial_task(sid)
+            else:
+                await self._ensure_initial(sid)
+            if self.sessions.get(sid) is not session or session.status != 'active' or session.analysis_version != version:
                 return
             snapshot.initial_analysis = session.initial_analysis
             work = []
             for index, segment in enumerate(snapshot.segments):
-                if not segment.finalized or segment.speaker == "teller":
+                if not segment.finalized or segment.speaker != "member" or segment.diarization_status != "CONFIRMED" or segment.speaker_source not in {"manual", "diarization"}:
                     continue
                 for sentence_index, (_, end) in enumerate(sentence_spans(segment.text)):
                     key = f"{segment.segment_id}:{sentence_index}"
@@ -162,27 +195,65 @@ class SessionService:
                         work.append((key, index, end))
             if not work:
                 session.analysis_pending = False
-                if not session.analyzed_sentences and session.review_outcome != "legitimate":
+                session.guidance_status = "waiting_for_speaker" if any(s.diarization_status in {"PENDING", "UNCERTAIN", "FAILED"} for s in session.segments) else "ready"
+                if session.initial_analysis and not session.analyzed_sentences and session.review_outcome != "legitimate":
                     session.analysis_provider = session.initial_analysis.provider
                     session.provider_notice = session.initial_analysis.notice
                 await self.publish(session, "insight_updated")
+            # Live assessments already review all context. Coalesce accumulated
+            # sentences instead of replaying two provider calls per old sentence.
+            pending_keys = [item[0] for item in work]
+            if snapshot.mode == "live" and work:
+                work = [work[-1]]
+            if work:
+                session.guidance_status = "reviewing"
+                await self.publish(session, "insight_updated")
             for key, index, end in work:
                 turn = snapshot.model_copy(deep=True)
-                turn.segments = turn.segments[:index + 1]
-                turn.segments[-1].text = turn.segments[-1].text[:end]
+                if snapshot.mode != "live":
+                    turn.segments = turn.segments[:index + 1]
+                    turn.segments[-1].text = turn.segments[-1].text[:end]
                 turn.insights = session.insights.copy()
                 turn.attention = session.attention.model_copy(deep=True)
                 result, provider, notice = await self.analysis.analyze(turn, history)
                 session = self.sessions.get(sid)
                 if not session or session.status != "active" or session.analysis_version != version:
                     return
-                session.analyzed_sentences.append(key)
+                if provider == "unavailable":
+                    # Keep the last successful assessment and leave these turns
+                    # eligible for a later retry; a failed request is not evidence.
+                    session.analysis_provider = provider
+                    session.guidance_status = "unavailable"
+                    if provider not in session.analysis_sources:
+                        session.analysis_sources.append(provider)
+                    session.provider_notice = notice
+                    session.analysis_pending = False
+                    await self.publish(session, "insight_updated")
+                    break
+                session.analyzed_sentences.extend(pending_keys if session.mode == "live" else [key])
+                # Only later, attributed member statements can contradict a cue.
+                latest = turn.segments[-1]
+                for old in session.insights:
+                    if session.mode == "live":
+                        # Each reviewed LLM result is the current full-context
+                        # assessment, replacing obsolete model hypotheses.
+                        if old.status in {"active", "acknowledged"}:
+                            old.status = "superseded"
+                        continue
+                    kinds = {s.signal_type for s in old.signals} | {
+                        {"URGENCY": "TIME_PRESSURE", "UNVERIFIED_RELATIONSHIP": "IDENTITY_VERIFICATION_NEEDED"}.get(c, c)
+                        for c in old.signal_codes}
+                    source_ids = {e.source_id for e in old.evidence if e.source_type == "segment"}
+                    if (old.status in {"active", "acknowledged"} and source_ids
+                            and any(denied(kind, latest.text) for kind in kinds)):
+                        old.status = "superseded"
                 self._merge_insights(session, result.insights)
                 session.analysis_provider = provider
                 if provider not in session.analysis_sources:
                     session.analysis_sources.append(provider)
                 session.provider_notice = notice
                 session.analysis_pending = key != work[-1][0]
+                session.guidance_status = "ready"
                 session.attention = calculate_attention(history, session.payment, session.insights,
                                                         previous=session.attention, as_of=session.as_of)
                 await self.publish(session, "insight_updated")
@@ -194,22 +265,133 @@ class SessionService:
             if session and session.status == "active" and session.analysis_version == version:
                 session.analysis_pending = False
                 session.analysis_provider = "unavailable"
+                session.guidance_status = "unavailable"
                 session.provider_notice = "Analysis could not complete. Review the transcript and continue with employee judgment."
                 await self.publish(session, "insight_updated")
         finally:
             if self.tasks.get(sid) is asyncio.current_task():
                 self.tasks.pop(sid, None)
 
+    async def retry_guidance(self, session_id):
+        session = self.active(session_id)
+        running = self.tasks.get(session_id)
+        if running and not running.done():
+            return session
+        if session.review_outcome == 'legitimate':
+            raise HTTPException(409, 'This review has a recorded decision. Add new member evidence before reviewing again.')
+        # Failed turns remain unanalyzed. Reuse them without fabricating a new
+        # transcript turn or bypassing provider cooldowns and human decisions.
+        session.analysis_version += 1
+        session.analysis_pending = True
+        session.guidance_status = 'reviewing'
+        await self.publish(session, 'insight_updated')
+        self.tasks[session_id] = asyncio.create_task(self._analyze(session.model_copy(deep=True)))
+        return session
+
+    @staticmethod
+    def _invalidate_assessment(session, history):
+        session.analyzed_sentences = []
+        for insight in session.insights:
+            if insight.status in {"active", "acknowledged"} and insight.source_segment_ids:
+                insight.status = "superseded"
+        session.attention = calculate_attention(history, session.payment, session.insights,
+                                                previous=session.attention, as_of=session.as_of)
+
+    async def correct_speaker(self, session_id, segment_id, speaker, scope="segment"):
+        session = self.active(session_id)
+        segment = next((s for s in session.segments if s.segment_id == segment_id), None)
+        if segment is None:
+            raise HTTPException(404, "Transcript turn not found.")
+        if scope == 'speaker' and not segment.speaker_id:
+            raise HTTPException(409, 'This turn has no confirmed voice identity. Correct this turn individually.')
+        targets = [segment]
+        if scope == 'speaker':
+            session.speaker_roles[segment.speaker_id] = speaker
+            targets = [item for item in session.segments if item.speaker_id == segment.speaker_id]
+        for item in targets:
+            item.speaker = item.speaker_role = speaker
+            item.speaker_source = 'diarization' if scope == 'speaker' else 'manual'
+            item.diarization_status = 'CONFIRMED' if speaker != 'unknown' else 'UNCERTAIN'
+            item.revision += 1
+        session.analysis_version += 1
+        session.analysis_pending = True
+        session.speaker_notice = ""
+        if session.review_outcome == "legitimate":
+            session.review_outcome = "in_review"
+        history = self.members.events(session.member_id, session.as_of)
+        self._invalidate_assessment(session, history)
+        session.activity.append(Activity(description="Transcript speaker corrected; evidence review requested."))
+        previous = self.tasks.pop(session_id, None)
+        if previous:
+            previous.cancel()
+        await self.publish(session, "transcript_speaker_updated")
+        self.tasks[session_id] = asyncio.create_task(self._analyze(session.model_copy(deep=True)))
+        return session
+
+    async def reconcile_speakers(self, reconciler):
+        session = reconciler.session
+        if (self.sessions.get(session.session_id) is not session or session.status != "active"
+                or session.session_id in self.ending):
+            return
+        changed = []
+        member_evidence_changed = False
+        for segment in session.segments:
+            if segment.speaker_source != "diarization":
+                continue
+            match = reconciler.match(segment)
+            if match is None:
+                continue
+            identity, start, end, status = match
+            role = session.speaker_roles.get(identity, "unknown") if identity else "unknown"
+            if status == "CONFIRMED" and role == "unknown":
+                status = "UNCERTAIN"
+            before = (segment.speaker_id, segment.speaker, segment.diarization_status)
+            after = (identity, role, status)
+            if before == after:
+                continue
+            member_evidence_changed |= ((before[1] == 'member' and before[2] == 'CONFIRMED')
+                                        or (role == 'member' and status == 'CONFIRMED'))
+            segment.speaker_id, segment.speaker, segment.diarization_status = after
+            segment.speaker_role = role
+            if start is not None and end is not None:
+                segment.start_time, segment.end_time = start, end
+                segment.timing_source = "provider"
+            segment.revision += 1
+            changed.append(segment.segment_id)
+            session.activity.append(Activity(description=f"Speaker attribution updated for turn {segment.segment_id}: {before[1]} to {role}; {status}."))
+        if changed:
+            running = self.tasks.get(session.session_id)
+            if not member_evidence_changed and running and not running.done() and session.guidance_status == 'reviewing':
+                await self.publish(session, "transcript_speaker_updated", {"segment_ids": changed})
+                return
+            session.analysis_version += 1
+            history = self.members.events(session.member_id, session.as_of)
+            if member_evidence_changed:
+                self._invalidate_assessment(session, history)
+            session.analysis_pending = True
+            previous = self.tasks.pop(session.session_id, None)
+            if previous:
+                previous.cancel()
+            await self.publish(session, "transcript_speaker_updated", {"segment_ids": changed})
+            self.tasks[session.session_id] = asyncio.create_task(self._analyze(session.model_copy(deep=True)))
+
     @staticmethod
     def _merge_insights(session, insights):
         # A repeated observation cannot reset an employee's dismissal or add points twice.
         for insight in insights:
-            signature = tuple(sorted(set(insight.signal_codes))) or (insight.title.casefold(),)
-            previous = next((i for i in session.insights if
-                             (tuple(sorted(set(i.signal_codes))) or (i.title.casefold(),)) == signature), None)
+            withdrawn = {s.signal_type for s in insight.signals if s.status == "NOT_ESTABLISHED"}
+            for old in session.insights:
+                if old.status in {"active", "acknowledged"} and withdrawn & {s.signal_type for s in old.signals}:
+                    old.status = "superseded"
+            def signature_of(item):
+                return tuple(sorted(s.signal_type for s in item.signals)) or tuple(sorted(set(item.signal_codes))) or (item.title.casefold(),)
+            signature = signature_of(insight)
+            previous = next((i for i in reversed(session.insights) if
+                             signature_of(i) == signature), None)
             if previous:
                 insight.insight_id = previous.insight_id
-                insight.status = previous.status
+                if previous.status != "superseded":
+                    insight.status = previous.status
                 session.insights[session.insights.index(previous)] = insight
             else:
                 session.insights.append(insight)
@@ -228,6 +410,8 @@ class SessionService:
             self.connections.get(session_id, set()).discard(socket)
 
     async def shutdown(self):
+        if hasattr(self, "diarization"):
+            await self.diarization.shutdown()
         finishing = list(self.finish_tasks.values())
         for task in finishing:
             task.cancel()
@@ -326,6 +510,8 @@ class SessionService:
 
     async def _finish(self, session_id: str, audio) -> Session:
         try:
+            if hasattr(audio, "diarization"):
+                await audio.diarization.stop_session(session_id)
             await audio.stop(session_id, finalize=True)
             return await self.end(session_id)
         finally:
@@ -335,6 +521,8 @@ class SessionService:
 
     async def end(self, session_id: str) -> Session:
         session = self.get(session_id)
+        if hasattr(self, "diarization"):
+            await self.diarization.stop_session(session_id)
         if session.status == "ended":
             return session
         pending = self.tasks.get(session_id)
@@ -373,11 +561,14 @@ class SessionService:
                               transcript_retained=session.retain_transcript,
                               analysis_providers=sorted(session.analysis_sources),
                               initial_analysis=session.initial_analysis,
-                              observations=[i.observation for i in session.insights if i.status != "dismissed"],
+                              observations=[i.observation for i in session.insights if i.status not in {"dismissed", "superseded"}],
                               unresolved_signals=[s.title for s in session.attention.signals if s.status == "active"],
                               actions=session.actions)
 
     async def delete(self, session_id: str):
+        self.initial_retry_after.pop(session_id, None)
+        if hasattr(self, "diarization"):
+            await self.diarization.stop_session(session_id)
         session = self.get(session_id)
         session.status = "ended"
         initial = self.initial_tasks.pop(session_id, None)

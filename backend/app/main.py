@@ -13,11 +13,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.schemas.contracts import ActionInput, AudioControl, CreateSession, Session, SessionSummary, TranscriptInput
-from app.services.audio import AudioCoordinator
+from app.schemas.contracts import ActionInput, AudioControl, CreateSession, Session, SessionSummary, TranscriptInput, SpeakerCorrection
+from app.services.audio import AudioCoordinator, AudioFormatError, AudioRateError
 from app.services.transcription import TranscriptionUnavailable
 from app.services.member_data import MemberData
 from app.services.sessions import SessionService
+from app.services.twilio_calling import create_twilio_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -66,6 +67,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected = "Bearer " + config.dev_auth_token
         if not authorization or not hmac.compare_digest(authorization.encode(), expected.encode()):
             raise HTTPException(401, "A valid development access token is required.")
+
+    app.include_router(create_twilio_router(config, authorize))
 
     @app.get("/health")
     def health():
@@ -121,6 +124,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def audio_control(session_id: str, request: AudioControl):
         return await audio.control(session_id, request)
 
+    @app.post("/sessions/{session_id}/transcript/{segment_id}/speaker", response_model=Session, dependencies=[Depends(authorize)])
+    async def correct_speaker(session_id: str, segment_id: str, request: SpeakerCorrection):
+        return await service.correct_speaker(session_id, segment_id, request.speaker, request.scope)
+
+    @app.post("/sessions/{session_id}/guidance/retry", response_model=Session, dependencies=[Depends(authorize)])
+    async def retry_guidance(session_id: str):
+        return await service.retry_guidance(session_id)
+
     @app.post("/sessions/{session_id}/actions", response_model=Session, dependencies=[Depends(authorize)])
     async def record_action(session_id: str, request: ActionInput):
         return await service.action(session_id, request)
@@ -170,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 incoming = await socket.receive()
                 if incoming["type"] == "websocket.disconnect":
                     break
+                kind = None
                 try:
                     if incoming.get("bytes") is not None:
                         await audio.send(session_id, socket, incoming["bytes"])
@@ -199,9 +211,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         await service.transcript(session_id, TranscriptInput.model_validate(message))
                     else:
                         raise ValueError("Unsupported message type.")
-                except (ValidationError, ValueError):
+                except (ValidationError, ValueError) as error:
                     await audio.stop(session_id, owner=socket)
-                    await service.emit(session_id, "error", {"message": "Invalid message or audio format. Use PCM16 mono at 16 kHz or manual text.", "code": "audio_error"}, target=socket)
+                    if isinstance(error, AudioFormatError):
+                        message = "Invalid audio packet. Use complete PCM16 mono samples at 16 kHz or manual text."
+                        code = "invalid_audio_format"
+                    elif isinstance(error, AudioRateError):
+                        message = "Audio arrived too quickly. Stop and restart recording, or use manual text."
+                        code = "audio_rate_error"
+                    elif isinstance(error, ValidationError) and kind == "audio_control":
+                        message = "Invalid microphone control message. Refresh the page and restart the backend to use matching versions. Speaker must be auto, member, teller, or unknown."
+                        code = "invalid_audio_control"
+                    elif isinstance(error, ValidationError) and kind == "transcript_submit":
+                        message = "Invalid transcript message. Check the text, sequence, and speaker, then retry."
+                        code = "invalid_transcript"
+                    else:
+                        message = "Invalid WebSocket message. Refresh the page and retry."
+                        code = "invalid_message"
+                    await service.emit(session_id, "error", {"message": message, "code": code}, target=socket)
                     await service.publish(session, "session_status")
                 except (HTTPException, TranscriptionUnavailable) as error:
                     await audio.stop(session_id, owner=socket)

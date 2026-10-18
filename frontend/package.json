@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@radix-ui/react-slot": "latest",
+    "@twilio/voice-sdk": "^2.18.5",
     "class-variance-authority": "latest",
     "clsx": "latest",
     "lucide-react": "latest",

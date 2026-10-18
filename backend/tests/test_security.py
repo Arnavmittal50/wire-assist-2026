@@ -181,7 +181,7 @@ def test_human_action_wins_when_pending_provider_ignores_cancellation(client, se
     service = client.app.state.service
     service.analysis = SlowAnalysis(service.settings)
     sid = client.post("/sessions", json=session_body).json()["session_id"]
-    client.post(f"/sessions/{sid}/transcript", json={"sequence": 0, "text": "A finalized turn."})
+    client.post(f"/sessions/{sid}/transcript", json={"sequence": 0, "text": "A finalized turn.", "speaker": "member"})
     assert began.wait(2)
     result = client.post(f"/sessions/{sid}/actions", json={"action_type": "MARK_LEGITIMATE",
                          "note": "Recipient independently verified and member wishes to proceed."})
@@ -216,7 +216,7 @@ def test_end_in_progress_rejects_new_user_evidence_and_actions(client, session_b
     audio.stop = observed_stop
     sid = client.post("/sessions", json=session_body).json()["session_id"]
     route = f"/sessions/{sid}"
-    client.post(route + "/transcript", json={"sequence": 0, "text": "Original finalized turn."})
+    client.post(route + "/transcript", json={"sequence": 0, "text": "Original finalized turn.", "speaker": "member"})
     assert began.wait(2)
     with ThreadPoolExecutor(max_workers=1) as workers:
         pending = workers.submit(client.post, route + "/end")
@@ -232,7 +232,8 @@ def test_end_in_progress_rejects_new_user_evidence_and_actions(client, session_b
     assert ended.json()["segment_count"] == 1
 
 
-def test_authorized_fake_live_flow_drains_final_audio_before_end(config, session_body):
+@pytest.mark.parametrize("speaker,expected_role", [("member", "unknown"), ("auto", "unknown")])
+def test_authorized_fake_live_flow_drains_final_audio_before_end(config, session_body, speaker, expected_role):
     config.gemini_api_key = "fake-backend-secret-never-for-client"
     app = create_app(config)
     adapters = []
@@ -271,7 +272,7 @@ def test_authorized_fake_live_flow_drains_final_audio_before_end(config, session
         assert adapters == []
         with client.websocket_connect(f"/ws/sessions/{sid}") as socket:
             authenticate(socket, config)
-            socket.send_json({"type": "audio_control", "command": "start", "speaker": "member"})
+            socket.send_json({"type": "audio_control", "command": "start", "speaker": speaker})
             recording = socket.receive_json()
             assert recording["payload"]["session"]["audio_status"] == "recording"
             socket.send_bytes(b"\x01\x00" * 80)
@@ -284,7 +285,7 @@ def test_authorized_fake_live_flow_drains_final_audio_before_end(config, session
             assert state["status"] == "ended"
             assert state["segment_count"] == 1
             assert state["segments"][0]["source"] == "gemini"
-            assert state["segments"][0]["speaker"] == "member"
+            assert state["segments"][0]["speaker"] == expected_role
             assert state["segments"][0]["text"] == "This is the finalized fake provider turn."
             assert adapters[0].closed and len(adapters[0].packets) == 1
             assert not app.state.audio.streams

@@ -4,7 +4,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
 def now() -> datetime:
@@ -62,7 +62,7 @@ class TranscriptInput(StrictModel):
     segment_id: str = Field(default_factory=uid, min_length=1, max_length=100)
     sequence: int = Field(ge=0, le=1000000)
     text: str = Field(min_length=1, max_length=4000)
-    speaker: Literal["member", "teller", "unknown"] = "unknown"
+    speaker: Literal["member", "teller", "unknown", "auto"] = "unknown"
 
     @field_validator("text")
     @classmethod
@@ -76,12 +76,51 @@ class Segment(TranscriptInput):
     timestamp: datetime = Field(default_factory=now)
     source: Literal["manual", "gemini"] = "manual"
     finalized: bool = True
+    speaker_source: Literal["manual", "automatic", "diarization"] = "manual"
+    session_id: str = ""
+    recording_id: str | None = None
+    start_time: float = Field(default=0, ge=0)
+    end_time: float = Field(default=0, ge=0)
+    timing_source: Literal["provider", "estimated", "manual"] = "manual"
+    speaker_id: str | None = None
+    speaker_role: Literal["teller", "member", "unknown"] = "unknown"
+    transcription_source: Literal["manual", "gemini_live"] = "manual"
+    diarization_status: Literal["PENDING", "CONFIRMED", "UNCERTAIN", "FAILED"] = "UNCERTAIN"
+    revision: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_manual_labels(cls, data):
+        if isinstance(data, dict):
+            data = dict(data)
+            role = data.get("speaker", "unknown")
+            data.setdefault("speaker_role", role if role in {"member", "teller"} else "unknown")
+            if (data.get("source", "manual") == "manual" and data.get("speaker_source", "manual") == "manual"
+                    and role in {"member", "teller"}):
+                data.setdefault("diarization_status", "CONFIRMED")
+        return data
+
+
+class SpeakerCorrection(StrictModel):
+    speaker: Literal["teller", "member", "unknown"]
+    scope: Literal["segment", "speaker"] = "segment"
 
 
 class Evidence(StrictModel):
     source_type: Literal["segment", "event"]
     source_id: str = Field(max_length=100)
     quote: str = Field(min_length=1, max_length=1200)
+
+
+class SignalObservation(StrictModel):
+    signal_type: Literal["LARGE_TRANSACTION", "POSSIBLE_IMPERSONATION", "IDENTITY_VERIFICATION_NEEDED",
+                         "TIME_PRESSURE", "SECRECY", "INVESTMENT_RISK", "UNUSUAL_PAYMENT_PATTERN"]
+    status: Literal["OBSERVED", "POSSIBLE", "NOT_ESTABLISHED"]
+    source_type: Literal["segment", "event"]
+    source_id: str = Field(min_length=1, max_length=100)
+    evidence_quote: str = Field(min_length=1, max_length=1200)
+    explanation: str = Field(min_length=1, max_length=1200)
+    suggested_question: str = Field(min_length=1, max_length=600)
 
 
 class Insight(StrictModel):
@@ -97,7 +136,8 @@ class Insight(StrictModel):
     confidence_in_observation: float = Field(ge=0, le=1)
     requires_human_review: bool = True
     signal_codes: list[str] = Field(default_factory=list, max_length=8)
-    status: Literal["active", "acknowledged", "dismissed", "resolved"] = "active"
+    signals: list[SignalObservation] = Field(default_factory=list, max_length=7)
+    status: Literal["active", "acknowledged", "dismissed", "resolved", "superseded"] = "active"
     provider: Literal["demo", "gemini"] = "demo"
 
 
@@ -115,7 +155,7 @@ class InitialAnalysisResult(AnalysisResult):
 
 
 class InitialAnalysis(InitialAnalysisResult):
-    provider: Literal["demo", "gemini"]
+    provider: Literal["demo", "gemini", "unavailable"]
     model: str | None = None
     notice: str
     event_count: int
@@ -176,8 +216,14 @@ class Session(StrictModel):
     initial_analysis: InitialAnalysis | None = None
     analyzed_sentences: list[str] = Field(default_factory=list)
     analysis_provider: Literal["demo", "gemini", "unavailable"] = "demo"
-    analysis_sources: list[Literal["demo", "gemini"]] = Field(default_factory=list)
+    analysis_sources: list[Literal["demo", "gemini", "unavailable"]] = Field(default_factory=list)
     provider_notice: str = "Deterministic demo analysis. No model has been called."
+    speaker_notice: str = ""
+    speaker_roles: dict[str, Literal["teller", "member", "unknown"]] = Field(default_factory=dict)
+    audio_clock_seconds: float = 0
+    diarization_pending: int = 0
+    diarization_notice: str = ""
+    guidance_status: Literal["idle", "waiting_for_speaker", "reviewing", "ready", "unavailable"] = "idle"
     data_source: str
     segments: list[Segment] = Field(default_factory=list)
     segment_count: int = 0
@@ -199,7 +245,7 @@ class Envelope(StrictModel):
 
 class AudioControl(StrictModel):
     command: Literal["start", "pause", "resume", "stop"]
-    speaker: Literal["member", "teller", "unknown"] = "unknown"
+    speaker: Literal["member", "teller", "unknown", "auto"] = "auto"
 
 
 class SessionSummary(StrictModel):

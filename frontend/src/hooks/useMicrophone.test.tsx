@@ -53,6 +53,34 @@ describe('microphone lifecycle', () => {
     await act(() => result.current.start());
     expect(result.current.status).toBe('stopped'); expect(config.onError).toHaveBeenCalledWith(expect.stringContaining('manual text'));
   });
+  it.each([
+    ['NotAllowedError', 'Microphone permission is blocked'],
+    ['NotFoundError', 'No microphone was found'],
+    ['NotReadableError', 'microphone could not be opened'],
+    ['OverconstrainedError', 'does not support the requested audio settings'],
+  ])('explains %s instead of just showing stopped', async (name, message) => {
+    getUserMedia.mockRejectedValue(new DOMException('test', name));
+    const config = options(); const { result } = renderHook(() => useMicrophone(config));
+    await act(() => result.current.start());
+    expect(result.current.status).toBe('stopped');
+    expect(config.onError).toHaveBeenCalledWith(expect.stringContaining(message));
+    expect(config.sendControl).not.toHaveBeenCalled();
+  });
+  it('identifies insecure pages before requesting a device', async () => {
+    vi.stubGlobal('isSecureContext', false);
+    const config = options(); const { result } = renderHook(() => useMicrophone(config));
+    await act(() => result.current.start());
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(config.onError).toHaveBeenCalledWith(expect.stringContaining('http://localhost:5173'));
+  });
+  it('distinguishes audio processing failure from denied microphone permission', async () => {
+    vi.stubGlobal('AudioContext', class { constructor() { throw new DOMException('test', 'NotSupportedError'); } });
+    const config = options(); const { result } = renderHook(() => useMicrophone(config));
+    await act(() => result.current.start());
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(config.onError).toHaveBeenCalledWith(expect.stringContaining('Microphone access succeeded, but browser audio processing'));
+    expect(config.sendControl).not.toHaveBeenCalled();
+  });
   it('stops live capture on disconnection and cleans up on unmount', async () => {
     const config = { ...options(), live: true };
     const { result, rerender, unmount } = renderHook(({ connection }) => useMicrophone({ ...config, connection }), { initialProps: { connection: 'connected' as ConnectionState } });

@@ -13,6 +13,27 @@ interface Options {
   sendAudio: (audio: ArrayBuffer) => void;
   onError: (message: string) => void;
 }
+
+function startupError(failure: unknown, stage: 'device' | 'processing' | 'provider'): string {
+  const name = failure instanceof Error || failure instanceof DOMException ? failure.name : '';
+  if (stage === 'provider') return 'Microphone access succeeded, but the transcription connection could not start. Reconnect to the backend and retry, or use manual text.';
+  if (stage === 'processing') return 'Microphone access succeeded, but browser audio processing could not start. Reload this page in Chrome or Edge on localhost and retry, or use manual text.';
+  switch (name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Microphone permission is blocked. Allow Microphone for this site using the icon beside the address bar. In Windows Settings > Privacy & security > Microphone, enable microphone access and desktop app access. Reload and retry, or use manual text.';
+    case 'NotFoundError':
+      return 'No microphone was found. Connect or enable an input device in Windows Settings > System > Sound, then retry or use manual text.';
+    case 'NotReadableError':
+    case 'AbortError':
+      return 'The microphone could not be opened. Check the selected input device in Windows Sound settings and close other apps using it, then retry or use manual text.';
+    case 'OverconstrainedError':
+      return 'The selected microphone does not support the requested audio settings. Select another input device in your browser, then retry or use manual text.';
+    default:
+      return 'Could not start the microphone. Check the input device and browser permissions, then retry or use manual text.';
+  }
+}
+
 export function useMicrophone(options: Options) {
   const [status, setStatus] = useState<MicrophoneState>('stopped');
   const statusRef = useRef<MicrophoneState>('stopped');
@@ -49,16 +70,20 @@ export function useMicrophone(options: Options) {
     const config = current.current;
     if (!config.enabled || statusRef.current === 'recording' || statusRef.current === 'starting' || statusRef.current === 'connecting') return;
     if (config.live && config.connection !== 'connected') { config.onError('Connect to the backend before starting live audio. Manual text is still available.'); return; }
+    if (globalThis.isSecureContext === false) { config.onError('Open this app at http://localhost:5173 or http://127.0.0.1:5173 to allow microphone access, or use HTTPS. Plain HTTP on a network IP cannot capture the microphone.'); return; }
     if (!navigator.mediaDevices?.getUserMedia || !globalThis.AudioContext || !globalThis.AudioWorkletNode) { config.onError('Microphone capture requires a supported browser on localhost or HTTPS. Use manual text instead.'); return; }
     const resume = statusRef.current === 'paused';
     const requestGeneration = ++generation.current;
     updateStatus('starting');
+    let stage: 'device' | 'processing' | 'provider' = 'device';
     try {
       const media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
       if (generation.current !== requestGeneration) { media.getTracks().forEach(track => track.stop()); return; }
       stream.current = media;
-      let audio: AudioContext;
-      try { audio = new AudioContext({ sampleRate: 16000 }); } catch { audio = new AudioContext(); }
+      stage = 'processing';
+      // Use the device's native rate. The worklet resamples to PCM16/16 kHz;
+      // forcing 16 kHz here can prevent a native-rate input from connecting.
+      const audio = new AudioContext();
       context.current = audio;
       await audio.audioWorklet.addModule(`${import.meta.env.BASE_URL}worklets/pcm-recorder.js`);
       if (generation.current !== requestGeneration) return;
@@ -74,6 +99,7 @@ export function useMicrophone(options: Options) {
       await audio.resume();
       if (generation.current !== requestGeneration) return;
       if (config.live) {
+        stage = 'provider';
         config.sendControl({ type: 'audio_control', command: resume ? 'resume' : 'start', speaker: config.speaker });
         updateStatus('connecting');
         providerTimer.current = setTimeout(() => {
@@ -84,7 +110,7 @@ export function useMicrophone(options: Options) {
     } catch (failure) {
       if (generation.current !== requestGeneration) return;
       release(); updateStatus('stopped');
-      config.onError((failure as Error).name === 'NotAllowedError' ? 'Microphone permission was denied. Allow microphone access in your browser or continue with manual text.' : 'Could not start the microphone. Check the audio device and browser permissions, or use manual text.');
+      config.onError(startupError(failure, stage));
     }
   }, [release, stop, updateStatus]);
   const pause = useCallback(() => {

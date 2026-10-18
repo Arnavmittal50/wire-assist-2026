@@ -6,6 +6,16 @@ from fastapi import HTTPException
 
 from app.schemas.contracts import AudioControl, TranscriptInput, uid
 from app.services.transcription import create_transcription_adapter, TranscriptionUnavailable
+from app.services.diarization import offset_seconds
+from app.services.diarization_pipeline import DiarizationPipeline
+
+
+class AudioFormatError(ValueError):
+    """A malformed binary PCM packet, distinct from JSON control validation."""
+
+
+class AudioRateError(ValueError):
+    """Audio transport exceeded the permitted streaming rate."""
 
 
 class AudioCoordinator:
@@ -16,6 +26,8 @@ class AudioCoordinator:
         self._background: set[asyncio.Task] = set()
         self._shutdown = False
         self.factory = create_transcription_adapter
+        self.diarization = DiarizationPipeline(service)
+        service.diarization = self.diarization
 
     async def control(self, session_id, request: AudioControl, owner=None):
         session = self.service.active(session_id)
@@ -34,18 +46,29 @@ class AudioCoordinator:
             raise HTTPException(409, "Live transcription requires configured Gemini access. Use manual text or a local microphone preview.")
         if owner is None:
             raise HTTPException(409, "Start audio through the authorized WebSocket connection.")
+        if not session.consent:
+            raise HTTPException(409, "Explicit consent is required before audio processing.")
+        await self.diarization.stop_session(session_id)
 
         # Reserve before the first await. Stream identity, not only session ID,
         # distinguishes a retiring recording from a later recording for this session.
         clock = time.monotonic()
         stream = {"owner": owner, "started": clock, "window": clock, "bytes": 0,
-                  "stopping": False, "finalize": False, "open_task": None}
+                  "stopping": False, "finalize": False, "open_task": None,
+                  "recording_id": uid(), "origin": session.audio_clock_seconds,
+                  "transcript_end": session.audio_clock_seconds}
+        self.diarization.start(session, stream["recording_id"])
 
-        async def on_transcript(text, finalized):
+        async def on_transcript(text, finalized, start_offset=None, end_offset=None):
             if (self.streams.get(session_id) is not stream or session.status != "active"
                     or not isinstance(text, str) or not text.strip()):
                 return
             if finalized:
+                start, end = offset_seconds(start_offset), offset_seconds(end_offset)
+                precise = start is not None and end is not None and end >= start and end <= session.audio_clock_seconds - stream["origin"] + 1
+                start_time = stream["origin"] + start if precise else stream["transcript_end"]
+                end_time = stream["origin"] + end if precise else session.audio_clock_seconds
+                end_time = max(start_time, end_time)
                 # Long utterances are explicitly split, with monotonically assigned segment IDs.
                 for offset in range(0, len(text), 4000):
                     chunk = text[offset:offset + 4000].strip()
@@ -54,7 +77,13 @@ class AudioCoordinator:
                     sequence = session.next_sequence
                     await self.service.transcript(session_id, TranscriptInput(
                         segment_id=uid(), sequence=sequence, text=chunk,
-                        speaker=request.speaker), source="gemini")
+                        speaker="unknown"), source="gemini", metadata={
+                            "recording_id": stream["recording_id"], "start_time": start_time, "end_time": end_time,
+                            "timing_source": "provider" if precise else "estimated",
+                            "speaker_source": "diarization", "transcription_source": "gemini_live",
+                            "diarization_status": "FAILED" if session_id in self.service.ending else "PENDING"})
+                stream["transcript_end"] = end_time
+                await self.diarization.transcript_arrived(stream["recording_id"])
             else:
                 await self.service.emit(session_id, "transcript_partial", {"text": text[:4000], "speaker": request.speaker})
 
@@ -101,7 +130,7 @@ class AudioCoordinator:
         if not stream or stream["owner"] is not owner or stream["stopping"] or session.audio_status != "recording":
             raise HTTPException(409, "Start transcription before sending audio.")
         if not isinstance(pcm, bytes) or not pcm or len(pcm) % 2 or len(pcm) > self.service.settings.max_audio_bytes:
-            raise ValueError("Audio must be bounded, even-length PCM16 mono chunks at 16 kHz.")
+            raise AudioFormatError("Audio must be bounded, even-length PCM16 mono chunks at 16 kHz.")
         clock = time.monotonic()
         if clock - stream["started"] > 590:
             raise TranscriptionUnavailable("The live demonstration reached its time limit. Stop and restart recording or use manual text.")
@@ -110,7 +139,8 @@ class AudioCoordinator:
             stream["bytes"] = 0
         stream["bytes"] += len(pcm)
         if stream["bytes"] > 128000:
-            raise ValueError("Audio arrived too quickly. Restart recording with the supported format.")
+            raise AudioRateError("Audio arrived too quickly. Restart recording with the supported format.")
+        self.diarization.feed(stream["recording_id"], pcm)
         await stream["adapter"].send(pcm)
 
     async def stop(self, session_id, finalize=False, owner=None) -> bool:
@@ -163,6 +193,10 @@ class AudioCoordinator:
         finally:
             with suppress(Exception):
                 await adapter.close()
+            if stream["finalize"] and session_id not in self.service.ending:
+                self.diarization.flush(stream["recording_id"])
+            else:
+                await self.diarization.stop_session(session_id)
             if self.streams.get(session_id) is stream:
                 self.streams.pop(session_id, None)
                 session = self.service.sessions.get(session_id)
@@ -173,6 +207,7 @@ class AudioCoordinator:
 
     async def shutdown(self):
         self._shutdown = True
+        await self.diarization.shutdown()
         await asyncio.gather(*(self.stop(sid) for sid in set(self.streams) | set(self._draining)))
         while self._background:
             pending = tuple(self._background)

@@ -19,7 +19,7 @@ from app.core.config import Settings
 PCM_MIME_TYPE = "audio/pcm;rate=16000"
 PCM_SAMPLE_RATE = 16000
 MAX_LIVE_SECONDS = 590  # Leave room before Google's documented 10-minute limit.
-TranscriptCallback = Callable[[str, bool], Awaitable[None]]
+TranscriptCallback = Callable[..., Awaitable[None]]  # Optional provider timestamp keywords.
 ErrorCallback = Callable[[str], Awaitable[None]]
 
 
@@ -208,7 +208,11 @@ class GeminiLiveTranscriptionAdapter:
                     if interim and isinstance(interim.text, str) and interim.text.strip():
                         await self._on_transcript(interim.text.strip(), False)
                     if final and isinstance(final.text, str) and final.text.strip():
-                        await self._on_transcript(final.text.strip(), True)
+                        start, end = getattr(final, "start_offset", None), getattr(final, "end_offset", None)
+                        if start is not None and end is not None:
+                            await self._on_transcript(final.text.strip(), True, start_offset=start, end_offset=end)
+                        else:
+                            await self._on_transcript(final.text.strip(), True)
                         if self._finishing:
                             self._drained.set()
                     if self._finishing and getattr(content, "turn_complete", False):

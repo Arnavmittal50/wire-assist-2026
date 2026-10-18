@@ -8,7 +8,7 @@ import pytest
 from app.models.repository import REDACTED, RepositoryError, SessionRepository, redact_session
 from app.schemas.contracts import (
     ActionType, Activity, Attention, Evidence, Insight, Payment,
-    Segment, Session, Signal, TellerAction,
+    Segment, Session, Signal, SignalObservation, TellerAction,
 )
 
 
@@ -30,6 +30,9 @@ def session(retain=False):
             evidence=[evidence, historical], source_segment_ids=["turn-1"], source_event_ids=["E00104"],
             recommended_action=ActionType.ASK_FOLLOW_UP, priority="medium",
             confidence_in_observation=0.9, signal_codes=["SECRECY"],
+            signals=[SignalObservation(signal_type="SECRECY", status="OBSERVED", source_type="segment",
+                                       source_id="turn-1", evidence_quote=PRIVATE, explanation=PRIVATE,
+                                       suggested_question=PRIVATE)],
         )],
         attention=Attention(score=15, level="routine", signals=[Signal(
             signal_id="conversation:SECRECY", code="SECRECY", title=PRIVATE, points=15,

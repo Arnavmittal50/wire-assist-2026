@@ -13,6 +13,17 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('workspace', () => {
+  it('does not overwrite a chosen mode when backend discovery finishes later', async () => {
+    let resolveHealth!: (value: unknown) => void;
+    const health = new Promise(resolve => { resolveHealth = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200,
+      json: async () => url.endsWith('/health') ? health : url.endsWith('/members') ? members : [event] })));
+    render(<App />);
+    fireEvent.change(screen.getByLabelText('Analysis mode'), { target: { value: 'demo' } });
+    resolveHealth({ status: 'ok', analysis_provider: 'gemini', transcription_provider: 'gemini_live', data_source: 'huskyhack_csv' });
+    await screen.findByRole('option', { name: 'Member M1002' });
+    expect(screen.getByLabelText('Analysis mode')).toHaveValue('demo');
+  });
   it('loads synthetic members and displays real API history', async () => {
     render(<App />);
     await screen.findByRole('option', { name: 'Member M1002' });

@@ -41,10 +41,10 @@ async def test_old_analysis_response_cannot_overwrite_newer_state(config):
                     return AnalysisResult(), "demo", "obsolete response"
             return AnalysisResult(), "demo", "current response"
     service.analysis = DelayedAnalysis(config)
-    await service.transcript(session.session_id, TranscriptInput(sequence=1, text="First turn"))
+    await service.transcript(session.session_id, TranscriptInput(sequence=1, text="First turn", speaker="member"))
     old = service.tasks[session.session_id]
     await began.wait()
-    await service.transcript(session.session_id, TranscriptInput(sequence=2, text="Second turn"))
+    await service.transcript(session.session_id, TranscriptInput(sequence=2, text="Second turn", speaker="member"))
     await service.tasks[session.session_id]
     await old
     assert session.provider_notice == "current response"
@@ -58,7 +58,7 @@ async def test_live_without_key_uses_labeled_fallback(config):
     session = service.create(CreateSession(member_id="M1002", consent=True, mode="live"))
     await service.transcript(session.session_id, TranscriptInput(sequence=1, text="I met this person online and need to pay today.", speaker="member"))
     await service.tasks[session.session_id]
-    assert session.analysis_provider == "demo"
-    assert "fallback" in session.provider_notice.lower()
-    assert all(i.provider == "demo" for i in session.insights)
+    assert session.analysis_provider == "unavailable"
+    assert "No live classifications" in session.provider_notice
+    assert session.insights == []
     await service.shutdown()

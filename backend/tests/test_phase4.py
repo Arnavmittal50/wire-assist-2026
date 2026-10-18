@@ -124,6 +124,6 @@ def test_summary_records_initial_demo_fallback_before_any_speech(client, session
     state = client.post("/sessions", json={**session_body, "mode": "live"}).json()
     sid = state["session_id"]
     client.post(f"/sessions/{sid}/end")
-    assert client.get(f"/sessions/{sid}/summary").json()["analysis_providers"] == ["demo"]
+    assert client.get(f"/sessions/{sid}/summary").json()["analysis_providers"] == ["unavailable"]
     baseline = client.get(f"/sessions/{sid}").json()["initial_analysis"]
-    assert baseline["provider"] == "demo" and baseline["model"] is None
+    assert baseline["provider"] == "unavailable" and baseline["model"] is None

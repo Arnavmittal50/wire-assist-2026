@@ -39,6 +39,11 @@ def redact_session(session: Session) -> Session:
         insight.title = "Observation text not retained"
         insight.observation = REDACTED
         insight.suggested_question = REDACTED
+        for observation in insight.signals:
+            observation.explanation = REDACTED
+            observation.suggested_question = REDACTED
+            if observation.source_type == "segment":
+                observation.evidence_quote = REDACTED
         for evidence in insight.evidence:
             if evidence.source_type == "segment":
                 evidence.quote = REDACTED
@@ -142,6 +147,13 @@ class SessionRepository:
                 interrupted = session.audio_status != "stopped" or session.analysis_pending
                 session.audio_status = "stopped"
                 session.analysis_pending = False
+                session.diarization_pending = 0
+                session.guidance_status = "idle"
+                for segment in session.segments:
+                    if segment.diarization_status == "PENDING":
+                        segment.diarization_status = "FAILED"
+                        segment.revision += 1
+                        session.diarization_notice = "Speaker identification was interrupted. Assign a role beside the turn or start a new recording."
                 if interrupted:
                     session.provider_notice = "Session restored after interruption. Microphone is stopped; continue with a new finalized turn."
                 sessions.append(session)

@@ -23,6 +23,8 @@ export class ApiClient {
     return response.status === 204 ? undefined as T : response.json() as Promise<T>;
   }
   health = () => this.request<Health>('/health');
+  twilioToken = () => this.request<{ token: string; identity: string; expires_in: number }>('/api/twilio/token');
+  twilioCallStatus = (sid: string) => this.request<{ status: string; connected_at: string | null; ended_at: string | null }>(`/api/twilio/calls/${encodeURIComponent(sid)}`, 'GET', undefined, 5000);
   members = () => this.request<Member[]>('/members');
   events = (id: string, asOf: string) => this.request<FinancialEvent[]>(`/members/${encodeURIComponent(id)}/events?as_of=${encodeURIComponent(asOf)}`);
   createSession = (input: CreateSession) => this.request<Session>('/sessions', 'POST', input);
@@ -30,7 +32,9 @@ export class ApiClient {
   sessions = () => this.request<Session[]>('/sessions');
   summary = (id: string) => this.request<SessionSummary>(`/sessions/${id}/summary`);
   transcript = (id: string, input: TranscriptInput) => this.request<Session>(`/sessions/${id}/transcript`, 'POST', input);
+  correctSpeaker = (id: string, segmentId: string, speaker: 'member' | 'teller' | 'unknown', scope: 'segment' | 'speaker' = 'segment') => this.request<Session>(`/sessions/${id}/transcript/${encodeURIComponent(segmentId)}/speaker`, 'POST', { speaker, scope });
   action = (id: string, input: ActionInput) => this.request<Session>(`/sessions/${id}/actions`, 'POST', input);
+  retryGuidance = (id: string) => this.request<Session>(`/sessions/${id}/guidance/retry`, 'POST');
   end = (id: string) => this.request<Session>(`/sessions/${id}/end`, 'POST', undefined, 60000);
   deleteSession = (id: string) => this.request<void>(`/sessions/${id}`, 'DELETE');
   socketUrl = (id: string) => `${this.baseUrl.replace(/^http/, 'ws')}/ws/sessions/${id}`;

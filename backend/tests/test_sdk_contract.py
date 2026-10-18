@@ -20,6 +20,33 @@ from app.services.analysis import AnalysisService
 from app.services.transcription import MAX_LIVE_SECONDS, PCM_MIME_TYPE, PCM_SAMPLE_RATE
 
 
+async def test_real_sdk_serializes_batch_diarization_request():
+    from app.services.audio_buffer import AudioBatch
+    from app.services.diarization import GeminiDiarizationService
+    requests = []
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            'id': 'mock', 'status': 'completed', 'steps': [{'type': 'model_output', 'content': [
+                {'type': 'text', 'text': 'Hello Hi', 'annotations': [
+                    {'type': 'word_info', 'text': 'Hello', 'speaker': 'spk_1', 'start_offset': '0.1s', 'end_offset': '0.3s'},
+                    {'type': 'word_info', 'text': 'Hi', 'speaker': 'spk_2', 'start_offset': '0.5s', 'end_offset': '0.7s'}]}]}]})
+    transport = httpx.MockTransport(respond)
+    def factory(key):
+        return genai.Client(api_key=key, http_options=types.HttpOptions(
+            base_url='https://offline.invalid', client_args={'transport': transport},
+            async_client_args={'transport': transport}))
+    adapter = GeminiDiarizationService(Settings(_env_file=None, gemini_api_key='fake-key'), factory)
+    words = await adapter.transcribe(AudioBatch('r', 0, 0, 1, b'\x00\x00' * 16000))
+    assert {word.speaker for word in words} == {'spk_1', 'spk_2'}
+    payload = json.loads(requests[0].content)
+    assert payload['model'] == 'gemini-3.5-transcribe'
+    assert payload['store'] is False
+    mode = payload['generation_config']['transcription_config']['mode']
+    assert mode['diarization_mode'] == 'speaker' and mode['timestamp_granularities'] == ['word']
+    assert base64.b64decode(payload['input'][0]['content'][0]['data']).startswith(b'RIFF')
+
+
 @pytest.mark.parametrize("initial", [False, True])
 async def test_real_sdk_serializes_application_pydantic_schema_before_mock_http(initial):
     requests = []
@@ -56,12 +83,15 @@ async def test_real_sdk_serializes_application_pydantic_schema_before_mock_http(
     assert result.insights == [] and provider == "gemini"
     request = requests[0]
     assert request.url.host == "offline.invalid"
-    model = "gemini-3.8-flash" if initial else "gemini-3.5-flash-lite"
+    model = "gemini-3.5-flash-lite" if initial else "gemini-3.1-flash-lite"
     assert model + ":generateContent" in request.url.path
     payload = json.loads(request.content)
     generation = payload["generationConfig"]
     assert generation["responseMimeType"] == "application/json"
-    schema = generation.get("responseSchema") or generation.get("responseJsonSchema")
+    schema = generation["responseSchema"]
+    wire_schema = json.dumps(schema)
+    for unsupported in ("additional_properties", "additionalProperties", "max_length", "maxLength", "max_items", "maxItems"):
+        assert unsupported not in wire_schema
     assert schema and "insights" in schema["properties"]
     if initial:
         assert "summary" in schema["properties"]

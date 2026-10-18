@@ -7,12 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from app.schemas.contracts import AnalysisResult, InitialAnalysisResult
+from app.services.analysis import gemini_response_schema
 from app.core.config import Settings
-
-
-class Probe(BaseModel):
-    ok: bool
 
 
 async def main():
@@ -24,15 +21,16 @@ async def main():
         timeout=20000, retry_options=types.HttpRetryOptions(attempts=1)))
     failed = False
     try:
-        for model in (settings.gemini_analysis_model, settings.gemini_update_model):
+        for model, schema in ((settings.gemini_analysis_model, InitialAnalysisResult),
+                              (settings.gemini_update_model, AnalysisResult)):
             try:
                 response = await client.aio.models.generate_content(
-                    model=model, contents='Return {"ok": true}.',
+                    model=model, contents='Return an empty insights list and an empty summary list if the schema provides summary.',
                     config=types.GenerateContentConfig(response_mime_type='application/json',
-                        response_schema=Probe, max_output_tokens=256,
+                        response_schema=gemini_response_schema(schema), max_output_tokens=512,
                         thinking_config=types.ThinkingConfig(thinking_level='low')))
-                parsed = Probe.model_validate_json(response.text or '')
-                print(f'{model}: structured JSON verified; ok={parsed.ok}')
+                schema.model_validate_json(response.text or '')
+                print(f'{model}: application analysis schema verified')
             except Exception as error:
                 failed = True
                 code = getattr(error, 'code', None)

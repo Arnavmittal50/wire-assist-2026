@@ -20,8 +20,13 @@ class Service:
             consent=True, retain_transcript=True, mode="live", payment=Payment(), data_source="test",
         )
         self.sessions = {self.session.session_id: self.session}
+        self.ending = set()
+        self.reconcile_speakers = AsyncMock()
         self.emit = AsyncMock()
         self.publish = AsyncMock()
+
+    def get(self, session_id):
+        return self.sessions[session_id]
 
     def active(self, session_id):
         session = self.sessions[session_id]
@@ -29,10 +34,10 @@ class Service:
             raise HTTPException(409, "Ended")
         return session
 
-    async def transcript(self, session_id, request, source="manual"):
+    async def transcript(self, session_id, request, source="manual", metadata=None):
         session = self.active(session_id)
         assert request.sequence not in [s.sequence for s in session.segments]
-        session.segments.append(Segment(**request.model_dump(), source=source))
+        session.segments.append(Segment(**request.model_dump(), source=source, **(metadata or {})))
         session.next_sequence = max(session.next_sequence, request.sequence + 1)
 
 
@@ -80,6 +85,7 @@ class Adapter:
 def setup(*, blocked_open=False, blocked_finish=False):
     service = Service()
     coordinator = AudioCoordinator(service)
+    coordinator.diarization.provider.transcribe = AsyncMock(return_value=[])
     adapters = []
     def factory(settings, on_transcript, on_error):
         adapter = Adapter(on_transcript, on_error)
@@ -190,7 +196,8 @@ async def test_final_chunks_have_unique_ids_and_do_not_deduplicate_repeated_spee
     assert [s.text for s in service.session.segments] == ["Yes.", "Yes.", "x" * 4000, "last words"]
     assert [s.sequence for s in service.session.segments] == [0, 1, 2, 3]
     assert len({s.segment_id for s in service.session.segments}) == 4
-    assert all(s.speaker == "member" and s.source == "gemini" for s in service.session.segments)
+    assert all(s.speaker == "unknown" and s.source == "gemini" and s.diarization_status == "PENDING"
+               for s in service.session.segments)
     await coordinator.shutdown()
 
 

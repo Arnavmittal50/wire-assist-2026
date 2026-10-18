@@ -63,10 +63,22 @@ versions are documented in the root README, `docs/api.md`, and `backend/requirem
 
 ## Two-stage Gemini analysis update ? October 17, 2026
 
-- Initial consented session review uses `gemini-3.8-flash` with the member's complete eligible observable history, producing cited summary facts and potential issues.
-- Finalized member/unknown speech is split into sentences. `gemini-3.5-flash-lite` receives new information, the saved initial review, cited history, and recent conversation. Teller/interim text does not trigger sentence analysis.
+- Initial consented session review uses `gemini-3.5-flash-lite` with the member's complete eligible observable history, producing cited summary facts and potential issues.
+- Finalized member speech triggers `gemini-3.1-flash-lite` with all eligible history and the complete conversation. Pending sentences are coalesced into one Live assessment. Teller and unknown turns provide context only; interim text never triggers analysis.
 - The initial review is shared across concurrent updates, persisted separately, and displayed with its provider/model label and evidence. Late results cannot undo employee decisions.
 - Regression validation: **178 backend tests, 31 frontend tests, and 2 browser workflow tests passed**; production build passed. Browser workflows used Demo mode with synthetic microphone input and no provider requests.
 - Credentialed checks: exactly one small structured-output request to each default analysis model succeeded (`{"ok": true}`); automatic retries were disabled. The key was saved only in ignored `backend/.env` and was not printed.
 - These two real responses verify basic model access and structured JSON. Full live financial analysis, cloud audio transcription, physical-microphone recognition quality, billing, and free-tier eligibility were not verified by these tiny calls. Adapter and workflow tests remain explicitly offline/demo.
 - Re-run the small access check with `.\.venv\Scripts\python.exe backend/scripts/check_models.py` from the project root.
+
+
+## Hybrid audio and responsive guidance ? October 17, 2026
+
+- Full backend suite: 245 passed before the final background-status and ambiguous-opening-voice regressions; affected suites were rerun afterward.
+- Frontend: 48 tests passed; production TypeScript/Vite build passed.
+- Browser: `review-clarity.spec.ts` passed, including a speaker correction withdrawing an incorrect timing signal and mobile layout checks.
+- Installed google-genai SDK HTTP serialization verified with an in-process transport for actual WAV payloads, verbatim mode, diarization, word timestamps, and `store=False`.
+- Real Gemini synthetic dialogue checks passed for the family-transfer example (identity verification, large amount, possible impersonation; no urgency/secrecy/investment), explicit timing, paraphrased timing, and later clarification withdrawing urgency. Successful update calls took 6.9?12.2 seconds in the final run. Earlier attempts encountered transient HTTP 503s; successful checks do not imply guaranteed availability.
+- A real local API session, including concurrent initial history, returned TIME_PRESSURE guidance in 18.1 seconds after a confirmed synthetic member turn. The temporary test session was deleted.
+- Real batch transcription accepted one second of generated silence in 4.0 seconds. This verifies model access and audio encoding only. No consented two-speaker speech recording was available, so real speaker-attribution accuracy remains unverified.
+- Live audio guidance additionally waits for the first 12-second batch and provider identification. Ambiguous voices remain unknown and require correction; silence across batch boundaries and recording restarts can break identity continuity.

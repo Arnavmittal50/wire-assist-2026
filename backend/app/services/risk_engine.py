@@ -7,7 +7,7 @@ Conversation weights are explicitly listed in CONVERSATION_RULES. Each code
 counts at most once, independent of repeated provider observations. Scores are
 capped at 100; 0-29 is routine, 30-59 review, and 60-100 elevated.
 
-Only already-grounded finalized member/unknown transcript evidence may enter
+Only already-grounded finalized member transcript evidence may enter
 this function. The analysis boundary validates speakers, source IDs and quotes.
 No demographic, answer-key, probability, or provider confidence input is used.
 """
@@ -23,6 +23,11 @@ from app.schemas.contracts import Attention, Evidence, Insight, Payment, Signal
 
 
 CONVERSATION_RULES: dict[str, tuple[int, str]] = {
+    "TIME_PRESSURE": (8, "Time pressure described in the conversation"),
+    "LARGE_TRANSACTION": (0, "Large transaction amount described; size alone is not fraud"),
+    "IDENTITY_VERIFICATION_NEEDED": (0, "Recipient identity needs independent verification"),
+    "INVESTMENT_RISK": (15, "Investment return promise needs review"),
+    "UNUSUAL_PAYMENT_PATTERN": (0, "Unusual pattern described; scored separately from records"),
     "URGENCY": (8, "Time pressure described in the conversation"),
     "SECRECY": (15, "Request for secrecy described in the conversation"),
     "UNVERIFIED_RELATIONSHIP": (12, "Recipient relationship needs independent verification"),
@@ -31,7 +36,7 @@ CONVERSATION_RULES: dict[str, tuple[int, str]] = {
     "AUTHORITY_PRESSURE": (15, "Pressure attributed to an authority figure"),
     "PROTECT_FUNDS": (18, "Instruction to move funds for claimed protection"),
     "CONTRADICTORY_EXPLANATION": (8, "Explanation needs clarification"),
-    "ROMANCE_INVESTMENT": (15, "An online relationship is linked to an investment request"),
+    "ROMANCE_INVESTMENT": (0, "An online relationship is linked to an investment request; scenario unconfirmed"),
     "PRESSURE": (10, "External pressure described in the conversation"),
 }
 
@@ -176,9 +181,14 @@ def calculate_attention(
         if not segment_evidence:
             continue
         for code in sorted(set(insight.signal_codes)):
+            if insight.signals and not any(s.signal_type == code and s.status == "OBSERVED" for s in insight.signals):
+                continue
             rule = CONVERSATION_RULES.get(code)
             if rule:
-                add(code, rule[1], rule[0], segment_evidence, "conversation")
+                specific = [Evidence(source_type=s.source_type, source_id=s.source_id, quote=s.evidence_quote)
+                            for s in insight.signals if s.signal_type == code and s.status == "OBSERVED"
+                            and s.source_type == "segment"] if insight.signals else segment_evidence
+                add(code, rule[1], rule[0], specific, "conversation")
 
     # Keep human decisions even if a later model response omits the old observation.
     for prior in previous_by_code.values():
