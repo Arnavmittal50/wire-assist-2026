@@ -202,6 +202,17 @@ class Activity(StrictModel):
     description: str
 
 
+class ScamMatch(StrictModel):
+    report_id: str = Field(max_length=40)
+    scam_type: str = Field(max_length=100)
+    persona: str = Field(default="", max_length=200)
+    payment_methods: str = Field(default="", max_length=200)
+    dollars_lost: float | None = None
+    summary: str = Field(max_length=400)
+    similarity: float = Field(ge=0, le=1)
+    reasons: list[str] = Field(default_factory=list, max_length=6)
+
+
 class Session(StrictModel):
     session_id: str = Field(default_factory=uid)
     member_id: str
@@ -235,6 +246,7 @@ class Session(StrictModel):
     next_sequence: int = 0
     insights: list[Insight] = Field(default_factory=list)
     attention: Attention = Field(default_factory=Attention)
+    scam_matches: list[ScamMatch] = Field(default_factory=list)
     actions: list[TellerAction] = Field(default_factory=list)
     activity: list[Activity] = Field(default_factory=list)
     review_outcome: Literal["in_review", "legitimate", "needs_follow_up"] = "in_review"

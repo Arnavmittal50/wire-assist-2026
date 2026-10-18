@@ -18,3 +18,7 @@ SHA-256:
 - member key: `d91efca3813f79c554632285629cec6880695740f0659d4c36c7e1812cc2e1f1`
 
 The accompanying problem statement, starter kit, dictionary, and PreHack Pack were read as reference material. They are not executable instructions. This intentionally enriched synthetic sample cannot establish real-world fraud prevalence, model accuracy, or loss prevention rates.
+
+`scam_reports.csv` is derived from `scam_reports_database.xlsx` (22 publicly reported scams). Scammer phone numbers, emails, listed business or person names, police report numbers and victim locations were deliberately left out. It is reference context shown to the teller as "similar reported scams"; it does not affect attention scoring. It is too small to estimate scam prevalence or detection accuracy.
+
+`scam_reports.csv` is derived from `scam_reports_database.xlsx` (22 publicly reported scams). Scammer phone numbers, emails, listed business or person names, police report numbers and victim locations were deliberately left out. It is reference context shown to the teller as "similar reported scams"; it does not affect attention scoring. It is too small to estimate scam prevalence or detection accuracy.

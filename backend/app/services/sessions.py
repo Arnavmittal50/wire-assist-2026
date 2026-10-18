@@ -12,6 +12,7 @@ from app.services.analysis import sentence_spans
 from app.services.groq_analysis import GroqAnalysisService
 from app.services.risk_engine import calculate_attention
 from app.services.signal_validation import denied
+from app.services.scam_reports import ScamReports
 
 
 class SessionService:
@@ -27,6 +28,7 @@ class SessionService:
         self.initial_tasks: dict[str, asyncio.Task] = {}
         self.initial_retry_after: dict[str, float] = {}
         self.analysis = GroqAnalysisService(settings)
+        self.scam_reports = ScamReports(settings.data_dir)
         self.ending: set[str] = set()
         self.finish_tasks: dict[str, asyncio.Task] = {}
 
@@ -263,6 +265,7 @@ class SessionService:
                 session.guidance_status = "ready"
                 session.attention = calculate_attention(history, session.payment, session.insights,
                                                         previous=session.attention, as_of=session.as_of)
+                session.scam_matches = self.scam_reports.match(session)
                 await self.publish(session, "insight_updated")
                 await self.emit(sid, "attention_updated", {"session": session.model_dump(mode="json")})
         except asyncio.CancelledError:
