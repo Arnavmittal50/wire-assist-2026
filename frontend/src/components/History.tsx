@@ -1,0 +1,7 @@
+import { ArrowUpRight, ChevronDown, History as HistoryIcon } from 'lucide-react';
+import type { FinancialEvent } from '../types/api';
+import { dateLabel, money } from '../lib/utils';
+
+export function History({ events, loading }: { events: FinancialEvent[]; loading: boolean }) {
+  return <details className="disclosure" open><summary><span><HistoryIcon size={17} /> Payment & account history <span className="count">{events.length}</span></span><ChevronDown size={16} /></summary><div className="history-content">{loading ? <p className="muted" role="status">Loading member history…</p> : events.length === 0 ? <p className="muted">No recorded activity before this review date.</p> : <div className="table-scroll"><table><thead><tr><th>Date</th><th>Activity</th><th>Recipient</th><th className="amount">Amount</th></tr></thead><tbody>{events.map(event => <tr key={event.event_id}><td>{dateLabel(event.timestamp)}</td><td><span className="event-type"><ArrowUpRight size={13} />{event.event_type.replaceAll('_', ' ')}</span><span className="event-description">{event.description}</span></td><td>{event.recipient_id || '—'}</td><td className="amount">{event.amount === null ? '—' : money(event.amount)}</td></tr>)}</tbody></table></div>}<p className="fine-print history-note">Only events available at the review time are shown. Recipient relationships require member confirmation.</p></div></details>;
+}
