@@ -36,7 +36,7 @@ test('complete manual review with microphone lifecycle, evidence, decisions, sum
   await expect(page.getByLabel('SYNTHETIC MEMBER')).toHaveValue('M1001');
   await page.getByRole('button', { name: 'M1002 · Sep 26' }).click();
   const id = await start(page);
-  await expect(page.getByText('Starting context', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'What we know', exact: true })).toBeVisible();
   const initial = await (await request.get(`${backend}/sessions/${id}`, { headers })).json();
   expect(initial.initial_analysis.provider).toBe('demo');
   expect(initial.initial_analysis.event_count).toBeGreaterThan(30);
