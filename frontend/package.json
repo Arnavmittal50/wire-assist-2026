@@ -12,6 +12,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "@radix-ui/react-slot": "latest",
     "@twilio/voice-sdk": "^2.18.5",
     "class-variance-authority": "latest",
