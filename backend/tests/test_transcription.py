@@ -203,7 +203,7 @@ async def test_finish_timeout_does_not_claim_finalized_transcript():
     adapter, client, _, callback, errors = build_adapter(drain_timeout_seconds=0.01)
     client.session.flush_response = None
     async with adapter:
-        await adapter.send(b"\x00\x00")
+        await adapter.send(b"\x00\x10")
         with pytest.raises(TranscriptionUnavailable, match="could not be confirmed"):
             await adapter.finish()
         callback.assert_not_called()
@@ -234,3 +234,27 @@ async def test_time_limit_requests_a_new_recording():
         with pytest.raises(TranscriptionUnavailable, match="time limit"):
             await adapter.send(b"\x00\x00")
         assert client.session.sent == []
+
+
+async def test_silent_tail_after_finalization_needs_no_new_words():
+    adapter, client, _, callback, errors = build_adapter(drain_timeout_seconds=0.01)
+    client.session.flush_response = None
+    async with adapter:
+        await adapter.send(b"\x00\x10")
+        await client.session.messages.put(response(final="Confirmed words."))
+        await until(lambda: callback.await_count == 1)
+        await adapter.send(bytes(640))
+        await adapter.finish()
+    errors.assert_not_called()
+    assert callback.await_count == 1
+
+
+async def test_hybrid_end_turn_allows_the_next_utterance():
+    adapter, client, _, callback, errors = build_adapter()
+    async with adapter:
+        await adapter.send(b"\x00\x10")
+        await adapter.end_turn()
+        await until(lambda: callback.await_count == 1)
+        await adapter.send(b"\x00\x10")
+        await adapter.finish()
+    assert callback.await_count == 2

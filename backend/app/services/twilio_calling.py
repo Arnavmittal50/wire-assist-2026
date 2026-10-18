@@ -1,10 +1,10 @@
-"""Phase 1 only: tokens, signed TwiML and call status. No audio processing."""
+"""Browser calling with optional, explicitly consented dual-track processing."""
 from datetime import datetime, timezone
 import re
 import time
 from urllib.parse import parse_qsl, urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
 from starlette.datastructures import FormData
 from twilio.jwt.access_token import AccessToken
 from twilio.jwt.access_token.grants import VoiceGrant
@@ -80,7 +80,7 @@ def configured(settings, *, token=False):
     return public_origin(settings)
 
 
-def create_twilio_router(settings, authorize):
+def create_twilio_router(settings, authorize, media=None):
     router = APIRouter()
     store = CallStore()
 
@@ -127,6 +127,9 @@ def create_twilio_router(settings, authorize):
             raise HTTPException(400, "Missing or invalid call identifier.")
         store.start(sid)
         response = VoiceResponse()
+        ticket = form.get("ProcessingTicket", "")
+        if ticket and media:
+            media.bind(ticket, sid)
         dial = Dial(caller_id=settings.twilio_phone_number, answer_on_bridge=True, timeout=30,
                     action=origin + "/twilio/dial-complete", method="POST")
         # No caller-provided To/phone/recipient field is ever used.
@@ -143,12 +146,16 @@ def create_twilio_router(settings, authorize):
         except ValueError:
             raise HTTPException(400, "Invalid callback sequence.") from None
         store.update(form.get("ParentCallSid"), form.get("CallStatus"), sequence)
+        if media:
+            media.status(form.get("ParentCallSid"), form.get("CallSid"), form.get("CallStatus"))
         return Response(status_code=204)
 
     @router.post("/twilio/dial-complete")
     async def complete(request: Request):
         form = await signed_form(request)
         store.update(form.get("CallSid"), form.get("DialCallStatus"))
+        if media:
+            media.status(form.get("CallSid"), form.get("DialCallSid"), form.get("DialCallStatus"))
         response = VoiceResponse()
         response.hangup()
         return Response(str(response), media_type="application/xml")
@@ -160,5 +167,23 @@ def create_twilio_router(settings, authorize):
         if row is None:
             raise HTTPException(404, "Call status not available yet.")
         return {key: row[key] for key in ("status", "connected_at", "ended_at")}
+
+    if media:
+        from pydantic import BaseModel, ConfigDict
+
+        class PrepareCall(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            session_id: str
+            participants_consent: bool
+
+        @router.post("/api/twilio/prepare", dependencies=[Depends(authorize)])
+        async def prepare(data: PrepareCall):
+            if not data.participants_consent:
+                raise HTTPException(422, "Confirm both participants consent to audio processing in the dashboard.")
+            return {"ticket": media.prepare(data.session_id)}
+
+        @router.websocket("/twilio/media/{ticket}")
+        async def media_socket(socket: WebSocket, ticket: str):
+            await media.websocket(socket, ticket)
 
     return router

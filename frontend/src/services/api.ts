@@ -1,4 +1,4 @@
-import type { ActionInput, CreateSession, FinancialEvent, Health, Member, Session, SessionSummary, TranscriptInput } from '../types/api';
+import type { ActionInput, InitialAnalysis, CreateSession, FinancialEvent, Health, Member, Session, SessionSummary, TranscriptInput } from '../types/api';
 
 export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
 export const DEFAULT_TOKEN = import.meta.env.VITE_DEV_AUTH_TOKEN || 'wire-assist-local-dev';
@@ -23,6 +23,8 @@ export class ApiClient {
     return response.status === 204 ? undefined as T : response.json() as Promise<T>;
   }
   health = () => this.request<Health>('/health');
+  preAnalysis = (input: CreateSession) => this.request<InitialAnalysis>(`/members/${encodeURIComponent(input.member_id)}/pre-analysis`, 'POST', input, 90000);
+  prepareCall = (sessionId: string) => this.request<{ ticket: string }>('/api/twilio/prepare', 'POST', { session_id: sessionId, participants_consent: true });
   twilioToken = () => this.request<{ token: string; identity: string; expires_in: number }>('/api/twilio/token');
   twilioCallStatus = (sid: string) => this.request<{ status: string; connected_at: string | null; ended_at: string | null }>(`/api/twilio/calls/${encodeURIComponent(sid)}`, 'GET', undefined, 5000);
   members = () => this.request<Member[]>('/members');

@@ -8,8 +8,8 @@ import { demoInsight } from '../test/fixtures';
 
 it('shows pending review without falsely claiming provider failure or readiness', () => {
   render(<><ProviderNotice provider="unavailable" pending notice="Preparing the initial member-history review." /><InsightCard pending /></>);
-  expect(screen.getByText('Gemini review in progress')).toBeVisible();
-  expect(screen.queryByText('Gemini unavailable')).not.toBeInTheDocument();
+  expect(screen.getByText('Evidence review in progress')).toBeVisible();
+  expect(screen.queryByText('Analysis unavailable')).not.toBeInTheDocument();
   expect(screen.getByText('REVIEWING')).toBeVisible();
   expect(screen.queryByText('READY')).not.toBeInTheDocument();
   expect(screen.getByText('Preparing guidance')).toBeVisible();

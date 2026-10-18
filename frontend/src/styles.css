@@ -32,3 +32,5 @@
 .call-heading time { font-variant-numeric: tabular-nums; }
 .call-status { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; }
 .call-status[role="alert"] { color: #a33535; }
+
+.call-consent { margin: 16px 20px 0; font-size: 12px; line-height: 1.5; }

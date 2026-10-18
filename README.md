@@ -1,3 +1,8 @@
+## Phase 2: live call assistance
+
+[Phase 2 setup, model benchmarks, and manual test checklist](docs/twilio-phase2.md).
+Phone calls can now optionally send consented, separate teller/member tracks to Gemini transcription. Groq handles pre-call history and live evidence-based guidance; attention scoring remains deterministic. Phase 1 calling remains available with AI assistance unchecked. No phone call is placed by automated tests.
+
 # Wire Assist 2.0
 
 A local teller copilot for consented, synthetic conversations. React/TypeScript/Vite/Tailwind frontend, Python/FastAPI backend, authenticated WebSockets, SQLite, and Google Gemini through `google-genai`. The teller controls every action; payment actions are simulations.

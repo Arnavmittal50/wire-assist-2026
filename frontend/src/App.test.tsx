@@ -63,3 +63,17 @@ describe('conversation rendering', () => {
     expect(dismiss).toHaveBeenCalledOnce();
   });
 });
+
+
+it('orders simultaneous call transcripts by media time and labels them from verified tracks', () => {
+  const first: Segment = { timestamp: '2026-09-27T00:00:00Z', finalized: true, segment_id: 'teller-early', sequence: 2, text: 'Earlier teller question.', speaker: 'teller',
+    source: 'gemini', speaker_source: 'twilio_track', diarization_status: 'CONFIRMED', call_sid: 'CA-test', start_time: 1, end_time: 2 };
+  const second: Segment = { ...first, segment_id: 'member-later', sequence: 1, text: 'Later member response.', speaker: 'member', start_time: 3, end_time: 4 };
+  render(<Transcript segments={[second, first, first]} partial="" />);
+  const turns = screen.getByRole('log').querySelectorAll('article');
+  expect(turns).toHaveLength(2);
+  expect(turns[0]).toHaveTextContent('Teller');
+  expect(turns[0]).toHaveTextContent('Earlier teller question.');
+  expect(turns[1]).toHaveTextContent('Member');
+  expect(screen.getAllByText('Call audio: verified track')).toHaveLength(2);
+});

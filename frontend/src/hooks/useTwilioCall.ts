@@ -51,7 +51,7 @@ export function useTwilioCall(api: ApiClient) {
     setMuted(false); setPhase('ended'); setMessage('Call ended by teller'); setWarning('');
   }, []);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (processingTicket?: string) => {
     if (current.current && !current.current.ended) return;
     if (current.current) release(current.current);
     const attempt: Attempt = { ended: false, fetching: false };
@@ -126,8 +126,8 @@ export function useTwilioCall(api: ApiClient) {
       });
       setMessage('Connecting through Twilio...');
       attempt.deadline = setTimeout(() => finish('error', 'No confirmed phone connection. Check the TwiML App URL and public tunnel, then retry.'), 45000);
-      // No destination or arbitrary client parameters are sent to Twilio.
-      const call = await device.connect();
+      // Destination stays server-owned. The optional opaque ticket binds consent and session.
+      const call = processingTicket ? await device.connect({ params: { ProcessingTicket: processingTicket } }) : await device.connect();
       if (!live()) { call.disconnect(); device.destroy(); return; }
       attempt.call = call;
       call.on('ringing', () => { if (live() && !attempt.started) { setPhase('ringing'); setMessage('Member phone is ringing'); } });

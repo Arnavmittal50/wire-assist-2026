@@ -1,5 +1,5 @@
 def test_health_auth_and_members(client):
-    assert client.get("/health").json()["analysis_provider"] == "demo"
+    assert client.get("/health").json()["analysis_provider"] == "unavailable"
     assert client.get("/members", headers={"Authorization": "Bearer wrong"}).status_code == 401
     members = client.get("/members").json()
     assert any(m["member_id"] == "M1002" for m in members)

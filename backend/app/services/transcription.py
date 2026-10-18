@@ -105,6 +105,9 @@ class GeminiLiveTranscriptionAdapter:
         self._started_at = 0.0
         self._sent_bytes = 0
         self._failure: str | None = None
+        self._pending_transcript = False
+        self._last_speech_byte = 0
+        self._finalized_speech_byte = 0
 
     async def open(self) -> None:
         if self._opened or self._closing:
@@ -163,12 +166,20 @@ class GeminiLiveTranscriptionAdapter:
                 timeout=self._timeout,
             )
             self._sent_bytes += len(pcm_bytes)
+            import struct
+            if any(abs(sample[0]) > 200 for sample in struct.iter_unpack('<h', pcm_bytes)):
+                self._last_speech_byte = self._sent_bytes
         except asyncio.CancelledError:
             raise
         except Exception:
             message = "Gemini could not receive audio. Stop recording and enter missing speech manually."
             await self._notify_failure(message)
             raise TranscriptionUnavailable(message) from None
+
+    async def end_turn(self) -> None:
+        """Hybrid VAD hint; preserves the connection for the next utterance."""
+        self._check_open()
+        await asyncio.wait_for(self._session.send_realtime_input(audio_stream_end=True), self._timeout)
 
     async def finish(self) -> None:
         """Flush pending speech before close; never invent a final transcript."""
@@ -186,6 +197,13 @@ class GeminiLiveTranscriptionAdapter:
             await asyncio.wait_for(self._drained.wait(), self._drain_timeout)
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            # A silence-only tail need not produce another transcript/turn_complete.
+            if not self._pending_transcript and self._last_speech_byte <= self._finalized_speech_byte:
+                return
+            message = "Final audio text could not be confirmed. Review the transcript and enter any missing speech manually."
+            await self._notify_failure(message)
+            raise TranscriptionUnavailable(message) from None
         except Exception:
             message = "Final audio text could not be confirmed. Review the transcript and enter any missing speech manually."
             await self._notify_failure(message)
@@ -206,8 +224,11 @@ class GeminiLiveTranscriptionAdapter:
                     interim = getattr(content, "interim_input_transcription", None)
                     final = getattr(content, "input_transcription", None)
                     if interim and isinstance(interim.text, str) and interim.text.strip():
+                        self._pending_transcript = True
                         await self._on_transcript(interim.text.strip(), False)
                     if final and isinstance(final.text, str) and final.text.strip():
+                        self._pending_transcript = False
+                        self._finalized_speech_byte = self._last_speech_byte
                         start, end = getattr(final, "start_offset", None), getattr(final, "end_offset", None)
                         if start is not None and end is not None:
                             await self._on_transcript(final.text.strip(), True, start_offset=start, end_offset=end)

@@ -76,8 +76,12 @@ class Segment(TranscriptInput):
     timestamp: datetime = Field(default_factory=now)
     source: Literal["manual", "gemini"] = "manual"
     finalized: bool = True
-    speaker_source: Literal["manual", "automatic", "diarization"] = "manual"
+    speaker_source: Literal["manual", "automatic", "diarization", "twilio_track"] = "manual"
     session_id: str = ""
+    call_sid: str | None = None
+    stream_sid: str | None = None
+    audio_track: str | None = None
+    is_final: bool = True
     recording_id: str | None = None
     start_time: float = Field(default=0, ge=0)
     end_time: float = Field(default=0, ge=0)
@@ -138,7 +142,7 @@ class Insight(StrictModel):
     signal_codes: list[str] = Field(default_factory=list, max_length=8)
     signals: list[SignalObservation] = Field(default_factory=list, max_length=7)
     status: Literal["active", "acknowledged", "dismissed", "resolved", "superseded"] = "active"
-    provider: Literal["demo", "gemini"] = "demo"
+    provider: Literal["demo", "gemini", "groq"] = "demo"
 
 
 class AnalysisResult(StrictModel):
@@ -155,7 +159,7 @@ class InitialAnalysisResult(AnalysisResult):
 
 
 class InitialAnalysis(InitialAnalysisResult):
-    provider: Literal["demo", "gemini", "unavailable"]
+    provider: Literal["demo", "gemini", "groq", "unavailable"]
     model: str | None = None
     notice: str
     event_count: int
@@ -215,11 +219,12 @@ class Session(StrictModel):
     analysis_pending: bool = False
     initial_analysis: InitialAnalysis | None = None
     analyzed_sentences: list[str] = Field(default_factory=list)
-    analysis_provider: Literal["demo", "gemini", "unavailable"] = "demo"
-    analysis_sources: list[Literal["demo", "gemini", "unavailable"]] = Field(default_factory=list)
+    analysis_provider: Literal["demo", "gemini", "groq", "unavailable"] = "demo"
+    analysis_sources: list[Literal["demo", "gemini", "groq", "unavailable"]] = Field(default_factory=list)
     provider_notice: str = "Deterministic demo analysis. No model has been called."
     speaker_notice: str = ""
     speaker_roles: dict[str, Literal["teller", "member", "unknown"]] = Field(default_factory=dict)
+    transcription_notice: str = ""
     audio_clock_seconds: float = 0
     diarization_pending: int = 0
     diarization_notice: str = ""

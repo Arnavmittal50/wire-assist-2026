@@ -8,7 +8,7 @@ function Sources({ evidence }: { evidence: Evidence[] }) {
   </details>;
 }
 
-export function InitialReview({ session }: { session: Session }) {
+export function InitialReview({ session }: { session: Pick<Session, "initial_analysis" | "payment" | "as_of" | "analysis_pending"> }) {
   const review = session.initial_analysis;
   const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(session.payment.amount);
   return <Card className="context-card initial-review">
@@ -17,7 +17,7 @@ export function InitialReview({ session }: { session: Session }) {
       <div className="review-payment"><div><span className="eyebrow">PROPOSED {session.payment.rail.toUpperCase()}</span><strong>{money}</strong></div><ArrowUpRight size={24} /></div>
       {!review ? <p role="status">{session.analysis_pending ? 'Preparing member-history summary...' : 'Member history has not been reviewed yet.'}</p> : <>
         <p className="review-scope">{review.event_count} eligible member events {review.provider === 'unavailable' ? 'available; model review did not complete.' : 'reviewed'} · As of {new Date(session.as_of).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</p>
-        {review.provider === 'unavailable' ? <div className="review-failure" role="alert"><strong>Gemini analysis unavailable</strong><p>{review.notice}</p></div> : <>
+        {review.provider === 'unavailable' ? <div className="review-failure" role="alert"><strong>Analysis unavailable</strong><p>{review.notice}</p></div> : <>
           <h3 className="review-heading"><CheckCircle2 size={16} /> What we know</h3>
           {review.summary.length ? <ul className="review-facts">{review.summary.map((fact, index) => <li key={index}><p>{fact.text}</p><Sources evidence={fact.evidence} /></li>)}</ul> : <p className="fine-print">No supported summary facts were returned.</p>}
           <h3 className="review-heading"><MessageCircle size={16} /> Clarify with the member <span>{review.insights.length}</span></h3>
@@ -27,7 +27,7 @@ export function InitialReview({ session }: { session: Session }) {
             <details className="review-reason"><summary>Why this matters</summary><p>{insight.observation}</p><Sources evidence={insight.evidence} /></details>
           </li>)}</ol></> : <p className="review-caption">No evidence-backed follow-up questions were returned.</p>}
         </>}
-        <details className="review-model"><summary>About this review</summary><strong>{review.provider === 'unavailable' ? 'Review unavailable' : review.provider === 'gemini' ? `Real Gemini · ${review.model}` : 'Deterministic demo · no model response'}</strong><p>{review.notice}</p></details>
+        <details className="review-model"><summary>About this review</summary><strong>{review.provider === 'unavailable' ? 'Review unavailable' : review.provider === 'groq' ? `Real Groq - ${review.model}` : review.provider === 'gemini' ? `Real Gemini · ${review.model}` : 'Deterministic demo · no model response'}</strong><p>{review.notice}</p></details>
       </>}
     </div>
   </Card>;

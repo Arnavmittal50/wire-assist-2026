@@ -8,7 +8,8 @@ from fastapi import HTTPException, WebSocket
 from app.schemas.contracts import (Activity, ActionInput, ActionType, CreateSession, Envelope,
                                   Session, Segment, SessionSummary, TellerAction, TranscriptInput, now)
 from app.models.repository import SessionRepository, redact_session
-from app.services.analysis import AnalysisService, sentence_spans
+from app.services.analysis import sentence_spans
+from app.services.groq_analysis import GroqAnalysisService
 from app.services.risk_engine import calculate_attention
 from app.services.signal_validation import denied
 
@@ -25,7 +26,7 @@ class SessionService:
         self.tasks: dict[str, asyncio.Task] = {}
         self.initial_tasks: dict[str, asyncio.Task] = {}
         self.initial_retry_after: dict[str, float] = {}
-        self.analysis = AnalysisService(settings)
+        self.analysis = GroqAnalysisService(settings)
         self.ending: set[str] = set()
         self.finish_tasks: dict[str, asyncio.Task] = {}
 
@@ -66,7 +67,7 @@ class SessionService:
 
     def _initial_task(self, session_id):
         session = self.get(session_id)
-        if session.initial_analysis is not None and not (session.mode == 'live' and session.initial_analysis.provider != 'gemini'):
+        if session.initial_analysis is not None and not (session.mode == 'live' and session.initial_analysis.provider != 'groq'):
             return None
         if time.monotonic() < self.initial_retry_after.get(session_id, 0):
             return None
@@ -109,7 +110,7 @@ class SessionService:
         session.attention = calculate_attention(history, session.payment, [], as_of=session.as_of)
         if session.mode == "live":
             session.analysis_provider = "unavailable"
-            session.provider_notice = "Live analysis requested. Gemini access has not yet been verified."
+            session.provider_notice = "Live analysis requested. Groq access has not yet been verified."
         session.activity.append(Activity(description="Consented review session created."))
         self.sessions[session.session_id] = session
         self.repository.save(session)
@@ -144,7 +145,7 @@ class SessionService:
             data['speaker'] = 'unknown'
         segment = Segment(**data, source=source, session_id=session_id, **(metadata or {}))
         session.segments.append(segment)
-        session.segments.sort(key=lambda s: (s.sequence, s.segment_id))
+        session.segments.sort(key=lambda s: (s.start_time, s.sequence) if s.call_sid else (s.sequence, 0))
         session.segment_count += 1
         session.next_sequence = max(session.next_sequence, request.sequence + 1)
         if session.review_outcome == "legitimate":
@@ -172,6 +173,8 @@ class SessionService:
     async def _analyze(self, snapshot: Session):
         sid, version = snapshot.session_id, snapshot.analysis_version
         try:
+            if snapshot.mode == "live" and snapshot.segments:
+                await asyncio.sleep(self.settings.groq_debounce_seconds)
             await self.emit(sid, "analysis_started", {"analysis_version": version})
             history = self.members.events(snapshot.member_id, snapshot.as_of)
             session = self.sessions.get(sid)
@@ -187,7 +190,7 @@ class SessionService:
             snapshot.initial_analysis = session.initial_analysis
             work = []
             for index, segment in enumerate(snapshot.segments):
-                if not segment.finalized or segment.speaker != "member" or segment.diarization_status != "CONFIRMED" or segment.speaker_source not in {"manual", "diarization"}:
+                if not segment.finalized or segment.speaker != "member" or segment.diarization_status != "CONFIRMED" or segment.speaker_source not in {"manual", "diarization", "twilio_track"}:
                     continue
                 for sentence_index, (_, end) in enumerate(sentence_spans(segment.text)):
                     key = f"{segment.segment_id}:{sentence_index}"
@@ -233,6 +236,7 @@ class SessionService:
                 session.analyzed_sentences.extend(pending_keys if session.mode == "live" else [key])
                 # Only later, attributed member statements can contradict a cue.
                 latest = turn.segments[-1]
+                acknowledged = {i.insight_id: i.suggested_question for i in session.insights if i.status == 'acknowledged'}
                 for old in session.insights:
                     if session.mode == "live":
                         # Each reviewed LLM result is the current full-context
@@ -248,6 +252,9 @@ class SessionService:
                             and any(denied(kind, latest.text) for kind in kinds)):
                         old.status = "superseded"
                 self._merge_insights(session, result.insights)
+                for insight in session.insights:
+                    if insight.status == 'active' and acknowledged.get(insight.insight_id) == insight.suggested_question:
+                        insight.status = 'acknowledged'
                 session.analysis_provider = provider
                 if provider not in session.analysis_sources:
                     session.analysis_sources.append(provider)
@@ -302,6 +309,8 @@ class SessionService:
         segment = next((s for s in session.segments if s.segment_id == segment_id), None)
         if segment is None:
             raise HTTPException(404, "Transcript turn not found.")
+        if segment.speaker_source == 'twilio_track':
+            raise HTTPException(409, 'This speaker is assigned by verified call routing and cannot be relabeled.')
         if scope == 'speaker' and not segment.speaker_id:
             raise HTTPException(409, 'This turn has no confirmed voice identity. Correct this turn individually.')
         targets = [segment]

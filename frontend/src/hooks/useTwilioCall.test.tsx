@@ -151,3 +151,10 @@ it('sanitizes SDK errors and prevents late SDK success from changing error state
   act(() => sdk.devices[0].call.emit('accept'));
   expect(result.current.phase).toBe('error');
 });
+
+
+it('sends only the server-issued processing ticket when AI assistance is enabled', async () => {
+  const { result } = renderHook(() => useTwilioCall(api));
+  await act(() => result.current.start('opaque-test-ticket'));
+  expect(sdk.devices[0].connect).toHaveBeenCalledWith({ params: { ProcessingTicket: 'opaque-test-ticket' } });
+});

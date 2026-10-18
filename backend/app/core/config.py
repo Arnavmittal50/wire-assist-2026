@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     twilio_phone_number: str = ""
     test_member_phone_number: str = ""
     public_backend_url: str = ""
+    groq_api_key: str = Field(default="", repr=False)
+    groq_model: str = "openai/gpt-oss-20b"
+    groq_precall_model: str = "openai/gpt-oss-120b"
+    groq_min_interval_seconds: float = Field(default=8, ge=1, le=120)
+    groq_debounce_seconds: float = Field(default=0.7, ge=0, le=5)
+    twilio_audio_queue_frames: int = Field(default=250, ge=10, le=500)
     gemini_analysis_model: str = "gemini-3.5-flash-lite"
     gemini_update_model: str = "gemini-3.1-flash-lite"
     gemini_transcription_model: str = "gemini-3.5-transcribe-live"

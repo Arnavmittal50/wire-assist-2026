@@ -18,7 +18,8 @@ from app.services.audio import AudioCoordinator, AudioFormatError, AudioRateErro
 from app.services.transcription import TranscriptionUnavailable
 from app.services.member_data import MemberData
 from app.services.sessions import SessionService
-from app.services.twilio_calling import create_twilio_router
+from app.services.twilio_calling import create_twilio_router, public_origin
+from app.services.twilio_media import TwilioMedia
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -26,10 +27,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     members = MemberData(config.data_dir)
     service = SessionService(config, members)
     audio = AudioCoordinator(service)
+    media = TwilioMedia(config, service, lambda: public_origin(config))
 
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await media.shutdown()
         await audio.shutdown()
         await service.shutdown()
 
@@ -37,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.service = service
     app.state.settings = config
     app.state.audio = audio
+    app.state.twilio_media = media
     app.add_middleware(CORSMiddleware, allow_origins=config.origins,
                        allow_methods=["GET", "POST", "DELETE"],
                        allow_headers=["Authorization", "Content-Type"])
@@ -68,14 +72,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not authorization or not hmac.compare_digest(authorization.encode(), expected.encode()):
             raise HTTPException(401, "A valid development access token is required.")
 
-    app.include_router(create_twilio_router(config, authorize))
+    app.include_router(create_twilio_router(config, authorize, media))
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "analysis_provider": "gemini" if config.gemini_api_key else "demo",
+        return {"status": "ok", "analysis_provider": "groq" if config.groq_api_key else "unavailable",
                 "transcription_provider": "gemini_live" if config.gemini_api_key else "manual",
-                "analysis_model": config.gemini_analysis_model,
-                "update_model": config.gemini_update_model,
+                "analysis_model": config.groq_precall_model,
+                "update_model": config.groq_model,
                 "transcription_model": config.gemini_transcription_model,
                 "data_source": members.members()[0]["data_source"] if members.members() else "empty",
                 "provider_verified": False}
@@ -97,6 +101,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if as_of.tzinfo is None:
             raise HTTPException(422, "as_of must include a timezone.")
         return members.events(member_id, as_of)
+
+    @app.post("/members/{member_id}/pre-analysis", dependencies=[Depends(authorize)])
+    async def pre_analysis(member_id: str, request: CreateSession):
+        if request.member_id != member_id:
+            raise HTTPException(422, "Member mismatch.")
+        member = get_member(member_id)
+        # Synthetic history only. This does not grant audio-processing consent.
+        preview = Session(**{**request.model_dump(), "consent": True, "mode": "live"}, data_source=member["data_source"])
+        return await service.analysis.initialize(preview, members.events(member_id, request.as_of))
 
     @app.post("/sessions", response_model=Session, dependencies=[Depends(authorize)])
     async def create_session(request: CreateSession):
@@ -138,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/sessions/{session_id}/end", response_model=Session, dependencies=[Depends(authorize)])
     async def end_session(session_id: str):
+        await media.stop_session(session_id)
         return await service.finish(session_id, audio)
 
     @app.get("/sessions/{session_id}/summary", response_model=SessionSummary, dependencies=[Depends(authorize)])
@@ -146,6 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/sessions/{session_id}", status_code=204, dependencies=[Depends(authorize)])
     async def delete_session(session_id: str):
+        await media.stop_session(session_id)
         service.get(session_id).status = "ended"
         await audio.stop(session_id)
         await service.delete(session_id)

@@ -22,7 +22,7 @@ describe('initial member review', () => {
       provider: 'unavailable', model: null, notice: 'Model access denied (HTTP 403).',
       event_count: 37, summary: [], insights: [],
     } })} />);
-    expect(screen.getByText('Gemini analysis unavailable')).toBeVisible();
+    expect(screen.getByText('Analysis unavailable')).toBeVisible();
     expect(screen.getByText(/available; model review did not complete/)).toBeVisible();
     expect(screen.getByRole('alert')).toHaveTextContent('HTTP 403');
     expect(screen.queryByText(/Deterministic demo/)).not.toBeInTheDocument();

@@ -160,8 +160,8 @@ def sentence_spans(text: str) -> list[tuple[int, int]]:
 
 def _context(session: Session, events: list[dict], *, all_history=False) -> tuple[dict, dict[str, str], dict[str, str]]:
     segments = [s for s in session.segments if s.finalized and s.speaker == "member"
-                and s.diarization_status == "CONFIRMED" and s.speaker_source in {"manual", "diarization"}]
-    segments = sorted(segments, key=lambda s: s.sequence)
+                and s.diarization_status == "CONFIRMED" and s.speaker_source in {"manual", "diarization", "twilio_track"}]
+    segments = sorted(segments, key=lambda s: (s.start_time, s.sequence) if s.call_sid else (s.sequence, 0))
     segment_text = {s.segment_id: s.text for s in segments}
     eligible = []
     for event in events:
@@ -196,7 +196,7 @@ def _context(session: Session, events: list[dict], *, all_history=False) -> tupl
         ],
         "conversation": [
             {"segment_id": s.segment_id, "speaker": s.speaker if s.diarization_status == "CONFIRMED" else "unknown", "text": s.text}
-            for s in sorted(session.segments, key=lambda s: s.sequence) if s.finalized
+            for s in sorted(session.segments, key=lambda s: (s.start_time, s.sequence) if s.call_sid else (s.sequence, 0)) if s.finalized
         ],
         "events": [
             {"event_id": event["event_id"], "evidence_text": event_text[str(event["event_id"])]}
